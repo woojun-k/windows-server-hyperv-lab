@@ -64,7 +64,8 @@
     Switches = @(
         @{ Name = 'LAB-Internal'; Type = 'Internal'; Stage = 'base'   }
         @{ Name = 'LAB-External'; Type = 'External'; Stage = 'rras'   }
-        @{ Name = 'LAB-DMZ';      Type = 'Internal'; Stage = 'rras'   }
+        @{ Name = 'LAB-DMZ';      Type = 'Private'; Stage = 'rras'   }
+        @{ Name = 'LAB-Egress';   Type = 'Private';  Stage = 'rras' }
         @{ Name = 'LAB-Nested';   Type = 'Private';  Stage = 'nested' }
     )
 
@@ -82,7 +83,8 @@
             Switch   = @(
                 'LAB-External',
                 'LAB-Internal',
-                'LAB-DMZ'
+                'LAB-DMZ',
+                'LAB-Egress'
             )
         }
 
@@ -99,7 +101,8 @@
             Switch   = @(
                 'LAB-External',
                 'LAB-Internal',
-                'LAB-DMZ'
+                'LAB-DMZ',
+                'LAB-Egress'
             )
         }
 

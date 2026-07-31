@@ -532,8 +532,8 @@ New-LabVM `
 | Stage | VM | 필요 스위치 |
 |---|---|---|
 | `base` | `없음` | LAB-Internal |
-| `rras` | `RRAS01` | External, Internal, DMZ |
-| `rras-core` | `RRAS-C01` | External, Internal, DMZ |
+| `rras` | `RRAS01` | External, Internal, DMZ, Egress |
+| `rras-core` | `RRAS-C01` | External, Internal, DMZ, Egress |
 | `addc` | `DC01`, `DC02`, `MGMT01`, `CLIENT01` | Internal |
 | `addc-core` | `DC-C01`, `DC-C02` | Internal |
 | `dhcp` | `DHCP01`, `DHCP02` | Internal |

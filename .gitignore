@@ -15,7 +15,6 @@ coverage/
 *.vmcx
 *.vmrs
 *.iso
-Exports/
 ISOs/
 VMs/
 VHDs/
