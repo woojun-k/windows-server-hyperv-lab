@@ -1,0 +1,11 @@
+﻿@{
+    # 이 파일을 LabConfig.local.psd1로 복사한 뒤 호스트에 맞게 수정한다.
+    LabRoot = 'D:\HyperV-Lab'
+
+    # 예: RAM 64GB 호스트에서 호스트 OS용으로 8GB 예약
+    HostReserveMB = 8192
+
+    # 필요할 때만 아래 값을 덮어쓴다.
+    # TimeZone       = 'Korea Standard Time'
+    # LocalAdminName = 'LabAdmin'
+}

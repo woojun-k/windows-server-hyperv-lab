@@ -1,0 +1,429 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<!--
+    LabVM.psm1의 오케스트레이션 함수(New-LabVM, New-LabStage, Remove-LabVM,
+    Reset-LabStage, Start-LabStage 등)는 콘솔에 직접 쓰지 않고 형식이
+    갖춰진 객체만 반환한다. 여기 정의된 뷰가 그 객체들을 콘솔에서 보기
+    좋게 표시하는 역할을 대신한다.
+
+    스크립트 블록은 모듈을 임포트하지 않은 세션에서도 렌더링될 수 있으므로
+    ConvertTo-LabGB 같은 모듈 비공개 함수를 호출하지 않고, 계산을
+    각 블록 안에 직접 풀어 쓴다.
+-->
+<Configuration>
+  <ViewDefinitions>
+
+    <View>
+      <Name>Lab.VmCreationResult</Name>
+      <ViewSelectedBy>
+        <TypeName>Lab.VmCreationResult</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <AutoSize />
+        <TableHeaders>
+          <TableColumnHeader><Label>Name</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Status</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Reason</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Detail</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>Name</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Status</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Reason</PropertyName></TableColumnItem>
+              <TableColumnItem>
+                <ScriptBlock>
+                  if ($_.Status -eq 'Created') {
+                      $switches = if (@($_.Switches).Count -gt 0) { @($_.Switches) -join ', ' } else { '격리' }
+                      "$($_.CPU) vCPU / $([math]::Round($_.MemoryMB / 1024, 1))GB / $switches"
+                  }
+                  elseif (@($_.Issues).Count -gt 0) {
+                      @($_.Issues) -join '; '
+                  }
+                </ScriptBlock>
+              </TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>Lab.StageCreationResult</Name>
+      <ViewSelectedBy>
+        <TypeName>Lab.StageCreationResult</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <AutoSize />
+        <TableHeaders>
+          <TableColumnHeader><Label>Stage</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Status</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Reason</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Created</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Skipped</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Reconciled</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Conflict</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Aborted</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Failed</Label></TableColumnHeader>
+          <TableColumnHeader><Label>RollbackFailed</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Retained</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>Stage</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Status</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Reason</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>CreatedCount</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>SkippedCount</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>ReconciledCount</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>ConflictCount</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>AbortedCount</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>FailedCount</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>RollbackFailedCount</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>RetainedCreatedCount</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>Lab.VmRemovalResult</Name>
+      <ViewSelectedBy>
+        <TypeName>Lab.VmRemovalResult</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <AutoSize />
+        <TableHeaders>
+          <TableColumnHeader><Label>Name</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Status</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Reason</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Issues</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>Name</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Status</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Reason</PropertyName></TableColumnItem>
+              <TableColumnItem>
+                <ScriptBlock>@($_.Issues) -join '; '</ScriptBlock>
+              </TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>Lab.StageResetResult</Name>
+      <ViewSelectedBy>
+        <TypeName>Lab.StageResetResult</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <AutoSize />
+        <TableHeaders>
+          <TableColumnHeader><Label>Stage</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Status</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Reason</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Removed</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Skipped</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Failed</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>Stage</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Status</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Reason</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>RemovedCount</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>SkippedCount</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>FailedCount</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>Lab.VmStartResult</Name>
+      <ViewSelectedBy>
+        <TypeName>Lab.VmStartResult</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <AutoSize />
+        <TableHeaders>
+          <TableColumnHeader><Label>Name</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Status</Label></TableColumnHeader>
+          <TableColumnHeader><Label>State</Label></TableColumnHeader>
+          <TableColumnHeader><Label>MemoryGB</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Reason</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>Name</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Status</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>State</PropertyName></TableColumnItem>
+              <TableColumnItem>
+                <ScriptBlock>[math]::Round($_.MemoryStartupBytes / 1GB, 1)</ScriptBlock>
+              </TableColumnItem>
+              <TableColumnItem><PropertyName>Reason</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>Lab.StageStartResult</Name>
+      <ViewSelectedBy>
+        <TypeName>Lab.StageStartResult</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <AutoSize />
+        <TableHeaders>
+          <TableColumnHeader><Label>Stage</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Status</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Reason</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Started</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Skipped</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Aborted</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Failed</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>Stage</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Status</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Reason</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>StartedCount</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>SkippedCount</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>AbortedCount</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>FailedCount</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>Lab.VmStopResult</Name>
+      <ViewSelectedBy>
+        <TypeName>Lab.VmStopResult</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <AutoSize />
+        <TableHeaders>
+          <TableColumnHeader><Label>Name</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Status</Label></TableColumnHeader>
+          <TableColumnHeader><Label>State</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Reason</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>Name</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Status</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>State</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Reason</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>Lab.StageStopResult</Name>
+      <ViewSelectedBy>
+        <TypeName>Lab.StageStopResult</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <AutoSize />
+        <TableHeaders>
+          <TableColumnHeader><Label>Stage</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Status</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Reason</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Stopped</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Skipped</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Failed</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>Stage</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Status</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Reason</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>StoppedCount</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>SkippedCount</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>FailedCount</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>Lab.PrerequisiteResult</Name>
+      <ViewSelectedBy>
+        <TypeName>Lab.PrerequisiteResult</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <AutoSize />
+        <TableHeaders>
+          <TableColumnHeader><Label>Name</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Disposition</Label></TableColumnHeader>
+          <TableColumnHeader><Label>DiskMode</Label></TableColumnHeader>
+          <TableColumnHeader><Label>RequiredGB</Label></TableColumnHeader>
+          <TableColumnHeader><Label>AvailableGB</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>Name</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Disposition</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>DiskMode</PropertyName></TableColumnItem>
+              <TableColumnItem>
+                <ScriptBlock>[math]::Round($_.RequiredDiskBytes / 1GB, 2)</ScriptBlock>
+              </TableColumnItem>
+              <TableColumnItem>
+                <ScriptBlock>[math]::Round($_.AvailableDiskBytes / 1GB, 2)</ScriptBlock>
+              </TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>Lab.TemplateGeneralizationResult</Name>
+      <ViewSelectedBy>
+        <TypeName>Lab.TemplateGeneralizationResult</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <AutoSize />
+        <TableHeaders>
+          <TableColumnHeader><Label>VhdPath</Label></TableColumnHeader>
+          <TableColumnHeader><Label>IsGeneralized</Label></TableColumnHeader>
+          <TableColumnHeader><Label>RegistryImageState</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>VhdPath</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>IsGeneralized</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>RegistryImageState</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>Lab.MemoryBudget</Name>
+      <ViewSelectedBy>
+        <TypeName>Lab.MemoryBudget</TypeName>
+      </ViewSelectedBy>
+      <ListControl>
+        <ListEntries>
+          <ListEntry>
+            <ListItems>
+              <ListItem>
+                <Label>호스트 전체</Label>
+                <ScriptBlock>"$([math]::Round($_.TotalMB / 1024, 1)) GB"</ScriptBlock>
+              </ListItem>
+              <ListItem>
+                <Label>호스트 예약</Label>
+                <ScriptBlock>"$([math]::Round($_.ReservedMB / 1024, 1)) GB"</ScriptBlock>
+              </ListItem>
+              <ListItem>
+                <Label>실행 중</Label>
+                <ScriptBlock>"$([math]::Round($_.AssignedMB / 1024, 1)) GB"</ScriptBlock>
+              </ListItem>
+              <ListItem>
+                <Label>요청</Label>
+                <ScriptBlock>"$([math]::Round($_.RequestedMB / 1024, 1)) GB"</ScriptBlock>
+              </ListItem>
+              <ListItem>
+                <Label>가용</Label>
+                <ScriptBlock>"$([math]::Round($_.AvailableMB / 1024, 1)) GB"</ScriptBlock>
+              </ListItem>
+            </ListItems>
+          </ListEntry>
+        </ListEntries>
+      </ListControl>
+    </View>
+
+    <View>
+      <Name>Lab.SwitchRequirement</Name>
+      <ViewSelectedBy>
+        <TypeName>Lab.SwitchRequirement</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <AutoSize />
+        <TableHeaders>
+          <TableColumnHeader><Label>Name</Label></TableColumnHeader>
+          <TableColumnHeader><Label>DesiredType</Label></TableColumnHeader>
+          <TableColumnHeader><Label>ActualType</Label></TableColumnHeader>
+          <TableColumnHeader><Label>DeclaredIn</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Exists</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Compliant</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>Name</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>DesiredType</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>ActualType</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>DeclaredIn</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Exists</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Compliant</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>Lab.StatusReport</Name>
+      <ViewSelectedBy>
+        <TypeName>Lab.StatusReport</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <AutoSize />
+        <TableHeaders>
+          <TableColumnHeader><Label>Stage</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Name</Label></TableColumnHeader>
+          <TableColumnHeader><Label>상태</Label></TableColumnHeader>
+          <TableColumnHeader><Label>vCPU(실제/설정)</Label></TableColumnHeader>
+          <TableColumnHeader><Label>MemoryGB(실제/설정)</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Drift</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>Stage</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Name</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>State</PropertyName></TableColumnItem>
+              <TableColumnItem>
+                <ScriptBlock>
+                  $actual = if ($null -ne $_.ActualvCPU) { $_.ActualvCPU } else { '-' }
+                  "$actual/$($_.DesiredvCPU)"
+                </ScriptBlock>
+              </TableColumnItem>
+              <TableColumnItem>
+                <ScriptBlock>
+                  $actual = if ($null -ne $_.ActualMemoryGB) { $_.ActualMemoryGB } else { '-' }
+                  "$actual/$($_.DesiredMemoryGB)"
+                </ScriptBlock>
+              </TableColumnItem>
+              <TableColumnItem><PropertyName>Drift</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+  </ViewDefinitions>
+</Configuration>

@@ -1,0 +1,31 @@
+# 사용자별 로컬 설정
+Scripts/LabConfig.local.psd1
+
+# PowerShell 임시 및 분석 결과
+*.log
+*.tmp
+TestResults/
+coverage/
+
+# Hyper-V 가상 디스크와 내보내기 파일
+*.vhd
+*.vhdx
+*.avhd
+*.avhdx
+*.vmcx
+*.vmrs
+*.iso
+Exports/
+ISOs/
+VMs/
+VHDs/
+Templates/
+Exports/
+Checkpoints/
+OfflineMount/
+Packages/
+
+# 편집기 설정
+.vs/
+.vscode/
+.idea/
