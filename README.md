@@ -4,6 +4,8 @@ Windows Server 2025 실습용 Hyper-V VM을 일관된 구성으로 생성하고 
 
 이 모듈은 반복되는 VM 프로비저닝을 줄여 AD DS, DNS, DHCP, RRAS, WSUS, AD CS, IIS 등 **게스트 OS 내부의 서버 역할 실습에 집중**할 수 있도록 돕습니다.
 
+실습 강의는 [윈도우 서버 2025 구성하기](https://velog.io/@polarishb/series/%EC%9C%88%EB%8F%84%EC%9A%B0-%EC%84%9C%EB%B2%84-2025-%EA%B5%AC%EC%84%B1%ED%95%98%EA%B8%B0) 시리즈에서 진행됩니다.
+
 > 이 프로젝트는 Windows Server 역할을 자동 설치하는 원클릭 배포 도구가 아닙니다.  
 > 템플릿 복제, VM 하드웨어·네트워크 구성, 응답 파일 주입과 VM 생명주기만 관리합니다.
 
