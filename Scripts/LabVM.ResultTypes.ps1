@@ -428,6 +428,11 @@ function New-LabStageStartResult {
 
         [object[]]$RequiredSwitches = @(),
 
+        # StageDependencies로 이 Stage와 함께 자동으로 켠(또는 켜려고
+        # 시도한) VM 이름. Results에도 각 VM별 결과가 들어있지만,
+        # 이 필드는 "왜 이 VM들이 대상에 포함됐는지"를 바로 보여준다.
+        [object[]]$DependencyNames = @(),
+
         [psobject]$MemoryBudget
     )
 
@@ -462,6 +467,7 @@ function New-LabStageStartResult {
 
         Results          = @($Results)
         RequiredSwitches = @($RequiredSwitches)
+        DependencyNames  = @($DependencyNames)
         MemoryBudget     = $MemoryBudget
     }
 }
@@ -492,6 +498,7 @@ function New-LabVmStopResult {
             'VmNotFound',
             'AmbiguousVmName',
             'AlreadyOff',
+            'StillRequiredByStage',
             'ShouldProcessDeclined',
             'Stopped',
             'StopException'
@@ -550,6 +557,7 @@ function New-LabStageStopResult {
             'Completed',
             'ShouldProcessDeclined',
             'AlreadyOff',
+            'StillRequiredElsewhere',
             'StopFailed'
         )]
         [string]$Reason,

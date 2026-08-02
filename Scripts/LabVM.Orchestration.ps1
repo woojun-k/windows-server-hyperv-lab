@@ -1219,7 +1219,18 @@ function Start-LabStage {
         )
     }
 
+    $dependencyNames = @(
+        Get-LabStageDependencyClosure `
+            -Stage $Stage `
+            -Config $cfg
+    )
+
+    # 의존 VM(예: RRAS01)이 Stage 자체 VM보다 먼저 시작되도록 맨
+    # 앞에 둔다. Select-Object -Unique는 첫 등장 순서를 유지하므로
+    # 이후 stageNames/Also에 같은 이름이 다시 나와도 순서가 안
+    # 흐트러진다.
     $targetNames = @(
+        $dependencyNames +
         $stageNames +
         @($Also | Select-LabNonEmptyString) |
             Select-Object -Unique
@@ -1527,8 +1538,81 @@ function Start-LabStage {
             -Reason $reason `
             -Results $resultArray `
             -RequiredSwitches $requiredSwitches `
+            -DependencyNames $dependencyNames `
             -MemoryBudget $memoryBudget
     )
+}
+
+function Test-LabVmStillNeeded {
+    # $Name을 끄기 전에, $ExcludingStage 이외의 다른 Stage가 지금
+    # StageDependencies로 이 VM을 요구하고 있으면서, 그 Stage가
+    # 실제로 활성 상태(그 Stage 소유 VM 중 하나라도 Running)인지
+    # 확인한다. 해당하면 그 Stage 이름을 돌려주고, 없으면 $null을
+    # 돌려준다.
+    #
+    # $Name의 소유 Stage 자체는 검사 대상에서 자연히 제외된다 -
+    # StageDependencies는 자기 자신 소유 VM을 의존성으로 선언할 수
+    # 없으므로(Assert-LabConfig가 막는다), $Name의 소유 Stage가
+    # 이 검사에 걸릴 일은 없다. 만약 ownNames(그 Stage의 소유 VM)에
+    # $Name이 포함됐는지를 따로 검사하면, "지금 끄려는 VM 자신이
+    # Running이니 자기 Stage가 활성 상태"라는 동어반복에 빠져 절대
+    # 끌 수 없게 되므로 그런 검사는 하지 않는다.
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Name,
+
+        [Parameter(Mandatory)]
+        [string]$ExcludingStage,
+
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary]$Config,
+
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary]$HostVmsByName
+    )
+
+    foreach ($otherStage in @($Config['StageOrder'])) {
+        $otherStage = [string]$otherStage
+
+        if ($otherStage -eq $ExcludingStage) {
+            continue
+        }
+
+        $dependsOnName = (
+            @(
+                Get-LabStageDependencyClosure `
+                    -Stage $otherStage `
+                    -Config $Config
+            ) -contains $Name
+        )
+
+        if (-not $dependsOnName) {
+            continue
+        }
+
+        $ownNames = @(
+            Resolve-LabSpec -Stage $otherStage -Config $Config |
+                ForEach-Object {
+                    [string]$_['Name']
+                }
+        )
+
+        $isActive = @(
+            $ownNames |
+                Where-Object {
+                    $HostVmsByName.Contains($_) -and
+                    $HostVmsByName[$_].State -eq 'Running'
+                }
+        ).Count -gt 0
+
+        if ($isActive) {
+            return $otherStage
+        }
+    }
+
+    $null
 }
 
 function Stop-LabStage {
@@ -1578,6 +1662,16 @@ function Stop-LabStage {
     $reversedStageNames = @($stageNames)
     [array]::Reverse($reversedStageNames)
 
+    # StageDependencies로 이 Stage와 함께 자동으로 켜졌을 VM들.
+    # Stage 자체 VM을 다 끈 다음, 가까운 의존부터(Get-LabStageDependencyClosure의
+    # 발견 순서 그대로) 이어서 끈다. 다른 활성 Stage가 아직 쓰고
+    # 있으면 Test-LabVmStillNeeded가 걸러낸다.
+    $dependencyNames = @(
+        Get-LabStageDependencyClosure `
+            -Stage $Stage `
+            -Config $cfg
+    )
+
     $additionalNames = @(
         foreach (
             $additionalName in
@@ -1594,6 +1688,7 @@ function Stop-LabStage {
 
     $targetNames = @(
         $reversedStageNames +
+        $dependencyNames +
         $additionalNames |
             Select-Object -Unique
     )
@@ -1652,6 +1747,34 @@ function Stop-LabStage {
             )
 
             continue
+        }
+
+        if (-not $Force) {
+            $stillNeededBy = Test-LabVmStillNeeded `
+                -Name $vm.Name `
+                -ExcludingStage $Stage `
+                -Config $cfg `
+                -HostVmsByName $hostVmsByName
+
+            if ($stillNeededBy) {
+                $results.Add(
+                    (
+                        New-LabVmStopResult `
+                            -Name $vm.Name `
+                            -Status Skipped `
+                            -Succeeded $true `
+                            -Reason 'StillRequiredByStage' `
+                            -State ([string]$vm.State) `
+                            -Issues @(
+                                "Stage '$stillNeededBy'가 아직 사용 중이라 " +
+                                "끄지 않았습니다. 정말 끄려면 -Force를 " +
+                                '사용하십시오.'
+                            )
+                    )
+                )
+
+                continue
+            }
         }
 
         if (
@@ -1740,11 +1863,16 @@ function Stop-LabStage {
         }
 
         'Skipped' {
-            # 전부 -WhatIf/거부로 건너뛴 경우와
-            # 이미 꺼져 있어 건너뛴 경우를 구분한다.
+            # 전부 -WhatIf/거부로 건너뛴 경우, 다른 Stage가 아직
+            # 써서 건너뛴 경우, 이미 꺼져 있어 건너뛴 경우를 구분한다.
             $declined = Get-LabStatusCount `
                 -Result $resultArray `
                 -Status 'ShouldProcessDeclined' `
+                -Property 'Reason'
+
+            $stillRequired = Get-LabStatusCount `
+                -Result $resultArray `
+                -Status 'StillRequiredByStage' `
                 -Property 'Reason'
 
             if (
@@ -1752,6 +1880,12 @@ function Stop-LabStage {
                 $declined -eq $resultArray.Count
             ) {
                 'ShouldProcessDeclined'
+            }
+            elseif (
+                $resultArray.Count -gt 0 -and
+                $stillRequired -eq $resultArray.Count
+            ) {
+                'StillRequiredElsewhere'
             }
             else {
                 'AlreadyOff'

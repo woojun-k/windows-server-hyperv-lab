@@ -203,15 +203,20 @@ function Get-LabHostMemoryBudget {
         Get-VM -ErrorAction Stop
     )
 
-    $assignedSum = (
-        $allVms |
-            Measure-Object `
-                -Property MemoryAssigned `
-                -Sum
-    ).Sum
+    # $allVms가 비어 있으면(예: VM이 하나도 없는 새 호스트)
+    # Measure-Object가 아무 출력도 내지 않아 $measured 자체가
+    # $null이 된다 - Set-StrictMode에서 $null.Sum은 예외이므로
+    # .Sum에 접근하기 전에 먼저 확인한다.
+    $measured = $allVms |
+        Measure-Object `
+            -Property MemoryAssigned `
+            -Sum
 
-    if ($null -eq $assignedSum) {
-        $assignedSum = 0
+    $assignedSum = if ($measured) {
+        $measured.Sum
+    }
+    else {
+        0
     }
 
     [int64]$requestSum = 0

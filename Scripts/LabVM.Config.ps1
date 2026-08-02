@@ -219,6 +219,7 @@ function Assert-LabConfig {
         'TimeZone',
         'LocalAdminName',
         'StageOrder',
+        'StageDependencies',
         'Templates',
         'Switches',
         'VMs'
@@ -509,6 +510,126 @@ function Assert-LabConfig {
             ($duplicateVmNames -join ', ')
         )
     }
+
+    # ------------------------------------------------------------
+    # StageDependencies 검증
+    # ------------------------------------------------------------
+
+    if (
+        $Config['StageDependencies'] -isnot
+        [System.Collections.IDictionary]
+    ) {
+        throw 'StageDependencies는 Hashtable이어야 합니다.'
+    }
+
+    $vmStageByName = @{}
+
+    foreach ($vm in @($Config['VMs'])) {
+        $vmStageByName[[string]$vm['Name']] =
+            [string]$vm['Stage']
+    }
+
+    # Stage 단위 의존 그래프: key Stage -> 그 key가 요구하는 VM들의
+    # 소유 Stage 집합. 순환 참조 탐지에 쓴다.
+    $stageDependsOnStages = @{}
+
+    foreach (
+        $depKey in
+        @($Config['StageDependencies'].Keys)
+    ) {
+        $depKeyName = [string]$depKey
+
+        if ($stageNames -notcontains $depKeyName) {
+            throw (
+                "StageDependencies의 Stage '$depKeyName'가 " +
+                'StageOrder에 없습니다.'
+            )
+        }
+
+        $depNames = @(
+            $Config['StageDependencies'][$depKey] |
+                ForEach-Object {
+                    [string]$_
+                }
+        )
+
+        $ownerStages =
+            [Collections.Generic.List[string]]::new()
+
+        foreach ($depName in $depNames) {
+            if (-not $vmStageByName.Contains($depName)) {
+                throw (
+                    "StageDependencies의 Stage '$depKeyName'가 " +
+                    "정의되지 않은 VM '$depName'을 참조합니다."
+                )
+            }
+
+            $ownerStage = $vmStageByName[$depName]
+
+            if ($ownerStage -eq $depKeyName) {
+                throw (
+                    "StageDependencies의 Stage '$depKeyName'가 " +
+                    "자기 자신 소유 VM '$depName'을 의존성으로 " +
+                    '선언할 수 없습니다.'
+                )
+            }
+
+            $ownerStages.Add($ownerStage)
+        }
+
+        $stageDependsOnStages[$depKeyName] = @(
+            $ownerStages | Select-Object -Unique
+        )
+    }
+
+    # 색상 기반 DFS로 모든 간선을 따라가며 순환을 찾는다(첫 번째
+    # 의존 Stage만 따라가면 다른 가지를 통한 순환을 놓칠 수 있다).
+    # 0=미방문, 1=경로상(방문 중), 2=완료.
+    $stageColor = @{}
+
+    foreach ($stageName in $stageNames) {
+        $stageColor[$stageName] = 0
+    }
+
+    function local:Test-LabStageDependencyCycle {
+        param(
+            [string]$Node,
+            [Collections.Generic.List[string]]$Path
+        )
+
+        $stageColor[$Node] = 1
+        $Path.Add($Node)
+
+        if ($stageDependsOnStages.Contains($Node)) {
+            foreach ($next in @($stageDependsOnStages[$Node])) {
+                if ($stageColor[$next] -eq 1) {
+                    throw (
+                        'StageDependencies 순환 참조: ' +
+                        (
+                            (@($Path) + $next) -join ' -> '
+                        )
+                    )
+                }
+
+                if ($stageColor[$next] -eq 0) {
+                    Test-LabStageDependencyCycle `
+                        -Node $next `
+                        -Path $Path
+                }
+            }
+        }
+
+        [void]$Path.Remove($Node)
+        $stageColor[$Node] = 2
+    }
+
+    foreach ($stageName in $stageNames) {
+        if ($stageColor[$stageName] -eq 0) {
+            Test-LabStageDependencyCycle `
+                -Node $stageName `
+                -Path ([Collections.Generic.List[string]]::new())
+        }
+    }
 }
 
 function Get-LabConfig {
@@ -755,6 +876,86 @@ function Get-LabStageSwitch {
     )
 }
 
+function Get-LabStageDependencyClosure {
+    # $Stage를 시작하려면 자동으로 함께 켜야 하는 VM 이름을,
+    # StageDependencies에 선언된 직접 의존부터 시작해 재귀적으로
+    # 전부 펼쳐서 돌려준다(전이 의존: dhcp가 addc의 DC01을 요구하고
+    # addc가 rras의 RRAS01을 요구하면, dhcp의 closure에는 DC01과
+    # RRAS01이 모두 들어간다). 반환 순서는 발견 순서(직접 의존이
+    # 먼저)이며, 이 순서가 그대로 시작 순서로 쓰인다.
+    [CmdletBinding()]
+    [OutputType([array])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Stage,
+
+        [System.Collections.IDictionary]$Config
+    )
+
+    if (-not $Config) {
+        $Config = Get-LabConfig
+    }
+
+    $cfg = $Config
+
+    # StageDependencies 자체가 없거나(레거시/테스트 Config) 특정
+    # Stage 키가 없을 수 있다 - 그런 경우는 의존성 없음으로 취급한다.
+    # Set-StrictMode -Version Latest에서는 $null을 인덱싱하면 예외가
+    # 나므로 .Contains()로 먼저 키 존재를 확인한다.
+    $stageDependencies = $cfg['StageDependencies']
+
+    $result = [Collections.Generic.List[string]]::new()
+    $visited = [Collections.Generic.HashSet[string]]::new()
+    $queue = [Collections.Generic.Queue[string]]::new()
+
+    foreach (
+        $directName in
+        @(
+            if (
+                $stageDependencies -and
+                $stageDependencies.Contains($Stage)
+            ) {
+                $stageDependencies[$Stage] |
+                    Select-LabNonEmptyString
+            }
+        )
+    ) {
+        if ($visited.Add($directName)) {
+            $queue.Enqueue($directName)
+        }
+    }
+
+    while ($queue.Count -gt 0) {
+        $name = $queue.Dequeue()
+        $result.Add($name)
+
+        $ownerStage = [string](
+            Resolve-LabSingleSpec `
+                -Name $name `
+                -Config $cfg
+        )['Stage']
+
+        foreach (
+            $nextName in
+            @(
+                if (
+                    $stageDependencies -and
+                    $stageDependencies.Contains($ownerStage)
+                ) {
+                    $stageDependencies[$ownerStage] |
+                        Select-LabNonEmptyString
+                }
+            )
+        ) {
+            if ($visited.Add($nextName)) {
+                $queue.Enqueue($nextName)
+            }
+        }
+    }
+
+    @($result)
+}
+
 function Get-LabStageRequiredSwitch {
     [CmdletBinding()]
     param(
@@ -792,6 +993,20 @@ function Get-LabStageRequiredSwitch {
         @(Resolve-LabSpec -Stage $Stage -Config $cfg)
     ) {
         foreach ($switchName in @($spec['Switch'])) {
+            $names.Add([string]$switchName)
+        }
+    }
+
+    # StageDependencies로 자동 시작되는 VM이 참조하는 스위치.
+    foreach (
+        $depName in
+        @(Get-LabStageDependencyClosure -Stage $Stage -Config $cfg)
+    ) {
+        $depSpec = Resolve-LabSingleSpec `
+            -Name $depName `
+            -Config $cfg
+
+        foreach ($switchName in @($depSpec['Switch'])) {
             $names.Add([string]$switchName)
         }
     }
