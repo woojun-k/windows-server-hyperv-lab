@@ -1039,14 +1039,89 @@ function Test-LabPrerequisite {
                 -Path $template.VhdPath `
                 -ErrorAction Stop
 
+            $templateAttachedDirectly = $false
+
             if ($templateVhd.Attached) {
+                $templateVhdNormalized = ConvertTo-LabNormalizedPath `
+                    -Path $template.VhdPath
+
+                foreach ($otherVm in @(Get-VM -ErrorAction Stop)) {
+                    $otherDrivePaths = @(
+                        Get-VMHardDiskDrive `
+                            -VM $otherVm `
+                            -ErrorAction Stop |
+                            ForEach-Object Path |
+                            Select-LabNonEmptyString
+                    )
+
+                    foreach ($otherDrivePath in $otherDrivePaths) {
+                        if (
+                            (
+                                ConvertTo-LabNormalizedPath `
+                                    -Path $otherDrivePath
+                            ) -ieq $templateVhdNormalized
+                        ) {
+                            $templateAttachedDirectly = $true
+                            break
+                        }
+                    }
+
+                    if ($templateAttachedDirectly) {
+                        break
+                    }
+                }
+            }
+
+            if ($templateAttachedDirectly) {
                 $issues.Add(
-                    "템플릿 VHDX가 연결된 상태입니다: " +
+                    "템플릿 VHDX가 VM에 직접 연결된 상태입니다: " +
                     $template.VhdPath
                 )
             }
 
-            if (-not $templateVhd.Attached) {
+            # generalize 결과가 이미 캐시(메모리 또는 디스크의 영구
+            # 캐시 파일)에 있으면 마운트 없이 그대로 쓴다. 이 템플릿을
+            # 부모로 하는 차등 디스크 VM이 실행 중이라 Attached=True로
+            # 보여도, 캐시가 있으면 전혀 문제가 되지 않는다.
+            $cachedGeneralization =
+                Get-LabTemplateGeneralizationCached `
+                    -VhdPath $template.VhdPath
+
+            if ($cachedGeneralization) {
+                foreach (
+                    $generalizationIssue in
+                    @($cachedGeneralization.Issues)
+                ) {
+                    $issues.Add(
+                        "템플릿 generalize 검사: " +
+                        $generalizationIssue
+                    )
+                }
+
+                foreach (
+                    $generalizationWarning in
+                    @($cachedGeneralization.Warnings)
+                ) {
+                    $warnings.Add(
+                        "템플릿 generalize 검사: " +
+                        $generalizationWarning
+                    )
+                }
+            }
+            elseif ($templateVhd.Attached) {
+                # 캐시가 없는데 지금은 마운트해서 새로 계산할 수도
+                # 없다(직접 연결됐거나, 다른 차등 디스크 VM이 실행
+                # 중이라 Attached=True). 이 템플릿에 대한 generalize
+                # 검사가 이번이 처음이라면, 아무 Stage VM도 켜져 있지
+                # 않은 시점에 한 번 New-LabStage/New-LabVM을 실행해
+                # 캐시를 만들어 두어야 한다.
+                $warnings.Add(
+                    '템플릿 generalize 검사 결과가 캐시에 없고, ' +
+                    '지금은 템플릿이 연결된 상태라 새로 계산할 수 ' +
+                    "없어 건너뛰었습니다: $($template.VhdPath)"
+                )
+            }
+            else {
                 if (
                     -not $PSCmdlet.ShouldProcess(
                         $template.VhdPath,
@@ -1192,4 +1267,3 @@ function Test-LabPrerequisite {
     return New-PrerequisiteResult `
         -Disposition Create
 }
-

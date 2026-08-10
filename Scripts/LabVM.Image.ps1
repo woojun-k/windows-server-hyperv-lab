@@ -99,7 +99,7 @@ function Get-LabTemplateMountMutexName {
     )
 }
 
-function Test-LabTemplateGeneralization {
+function Get-LabTemplateGeneralizationCacheKey {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -119,22 +119,167 @@ function Test-LabTemplateGeneralization {
     )
 
     # 파일이 교체되면 자동으로 새 캐시 키가 만들어진다.
-    $cacheKey = (
-        '{0}|{1}|{2}' -f
-        $normalizedPath.ToUpperInvariant(),
-        $item.Length,
-        $item.LastWriteTimeUtc.Ticks
+    [pscustomobject]@{
+        NormalizedPath = $normalizedPath
+        CacheKey       = (
+            '{0}|{1}|{2}' -f
+            $normalizedPath.ToUpperInvariant(),
+            $item.Length,
+            $item.LastWriteTimeUtc.Ticks
+        )
+    }
+}
+
+function Get-LabTemplateGeneralizationCachePath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$NormalizedPath
     )
+
+    $NormalizedPath + '.generalize-cache.json'
+}
+
+# 템플릿을 마운트하지 않고, 이미 계산해 둔 generalize 결과가
+# (이 프로세스의 메모리 캐시 또는 디스크의 영구 캐시 파일에) 있는지만
+# 확인한다. 이 VHDX를 부모로 하는 차등 디스크 VM이 실행 중이어서
+# Get-VHD의 Attached가 True로 보여도(여러 Stage VM이 같은 템플릿을
+# 동시에 참조하는 정상적인 사용 형태), 캐시가 있으면 마운트가 전혀
+# 필요 없다. 캐시가 없으면 $null을 반환하며, 이때만 호출자가
+# Test-LabTemplateGeneralization으로 실제 마운트 계산을 시도해야 한다.
+function Get-LabTemplateGeneralizationCached {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$VhdPath
+    )
+
+    $keyInfo = Get-LabTemplateGeneralizationCacheKey -VhdPath $VhdPath
 
     if (
         $script:TemplateGeneralizationCache.ContainsKey(
-            $cacheKey
+            $keyInfo.CacheKey
         )
     ) {
         return (
-            $script:TemplateGeneralizationCache[$cacheKey]
+            $script:TemplateGeneralizationCache[$keyInfo.CacheKey]
         )
     }
+
+    $cachePath = Get-LabTemplateGeneralizationCachePath `
+        -NormalizedPath $keyInfo.NormalizedPath
+
+    if (-not (Test-Path -LiteralPath $cachePath)) {
+        return $null
+    }
+
+    try {
+        $persisted = Get-Content `
+            -LiteralPath $cachePath `
+            -Raw `
+            -ErrorAction Stop |
+            ConvertFrom-Json `
+                -ErrorAction Stop
+    }
+    catch {
+        # 캐시 파일이 손상됐으면 무시하고 실제 계산이 필요하다고 본다.
+        return $null
+    }
+
+    if ($persisted.CacheKey -ne $keyInfo.CacheKey) {
+        return $null
+    }
+
+    $result = [pscustomobject]@{
+        PSTypeName         = 'Lab.TemplateGeneralizationResult'
+        VhdPath            = $keyInfo.NormalizedPath
+        IsGeneralized      = [bool]$persisted.IsGeneralized
+        ExpectedImageState = [string]$persisted.ExpectedImageState
+        RegistryImageState = [string]$persisted.RegistryImageState
+        StateIniImageState = [string]$persisted.StateIniImageState
+        Issues             = @($persisted.Issues)
+        Warnings           = @($persisted.Warnings)
+    }
+
+    $script:TemplateGeneralizationCache[$keyInfo.CacheKey] = $result
+
+    $result
+}
+
+function Save-LabTemplateGeneralizationCache {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$CacheKey,
+
+        [Parameter(Mandatory)]
+        [string]$NormalizedPath,
+
+        [Parameter(Mandatory)]
+        [pscustomobject]$Result
+    )
+
+    $cachePath = Get-LabTemplateGeneralizationCachePath `
+        -NormalizedPath $NormalizedPath
+
+    $tempCachePath = (
+        "$cachePath.tmp-" +
+        [guid]::NewGuid().ToString('N')
+    )
+
+    try {
+        [pscustomobject]@{
+            CacheKey           = $CacheKey
+            IsGeneralized      = $Result.IsGeneralized
+            ExpectedImageState = $Result.ExpectedImageState
+            RegistryImageState = $Result.RegistryImageState
+            StateIniImageState = $Result.StateIniImageState
+            Issues             = @($Result.Issues)
+            Warnings           = @($Result.Warnings)
+        } |
+            ConvertTo-Json |
+            Set-Content `
+                -LiteralPath $tempCachePath `
+                -Encoding UTF8 `
+                -ErrorAction Stop
+
+        # 다른 프로세스가 읽는 도중 깨진 내용을 보지 않도록,
+        # 임시 파일에 다 쓴 뒤 원자적으로 자리를 바꾼다.
+        Move-Item `
+            -LiteralPath $tempCachePath `
+            -Destination $cachePath `
+            -Force `
+            -ErrorAction Stop
+    }
+    catch {
+        # 캐시 저장 실패는 치명적이지 않다: 다음 호출에서 다시
+        # 마운트해 계산하면 된다.
+        if (Test-Path -LiteralPath $tempCachePath) {
+            Remove-Item `
+                -LiteralPath $tempCachePath `
+                -Force `
+                -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-LabTemplateGeneralization {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$VhdPath
+    )
+
+    $cached = Get-LabTemplateGeneralizationCached -VhdPath $VhdPath
+
+    if ($cached) {
+        return $cached
+    }
+
+    $keyInfo = Get-LabTemplateGeneralizationCacheKey -VhdPath $VhdPath
+    $normalizedPath = $keyInfo.NormalizedPath
+    $cacheKey = $keyInfo.CacheKey
 
     # 같은 템플릿에 대한 Mount-VHD/Dismount-VHD가 다른 프로세스와
     # 겹치지 않도록 전역 뮤텍스로 직렬화한다.
@@ -165,14 +310,12 @@ function Test-LabTemplateGeneralization {
             )
         }
 
-        if (
-            $script:TemplateGeneralizationCache.ContainsKey(
-                $cacheKey
-            )
-        ) {
-            return (
-                $script:TemplateGeneralizationCache[$cacheKey]
-            )
+        # 뮤텍스를 기다리는 동안 다른 프로세스가 이미 계산해
+        # 캐시 파일에 남겨뒀을 수 있다.
+        $cached = Get-LabTemplateGeneralizationCached -VhdPath $VhdPath
+
+        if ($cached) {
+            return $cached
         }
 
         $result = Get-LabTemplateGeneralizationState `
@@ -180,6 +323,11 @@ function Test-LabTemplateGeneralization {
             -NormalizedPath $normalizedPath
 
         $script:TemplateGeneralizationCache[$cacheKey] = $result
+
+        Save-LabTemplateGeneralizationCache `
+            -CacheKey $cacheKey `
+            -NormalizedPath $normalizedPath `
+            -Result $result
 
         $result
     }
@@ -825,4 +973,3 @@ rem --- end LabVM unattend cleanup ---
 
     $xml = $null
 }
-
