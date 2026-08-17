@@ -828,6 +828,49 @@ function Get-LabSwitchSpec {
     )
 }
 
+function Get-LabExternalSwitchName {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [System.Collections.IDictionary]$Config
+    )
+
+    if (-not $Config) {
+        $Config = Get-LabConfig
+    }
+
+    $externalSwitches = @(
+        $Config['Switches'] |
+            Where-Object {
+                [string]$_['Type'] -eq 'External'
+            }
+    )
+
+    if ($externalSwitches.Count -eq 0) {
+        throw (
+            'LabConfig.psd1에 Type이 External인 가상 스위치가 ' +
+            '정의되어 있지 않습니다.'
+        )
+    }
+
+    if ($externalSwitches.Count -gt 1) {
+        throw (
+            'LabConfig.psd1에 Type이 External인 가상 스위치가 ' +
+            '여러 개 정의되어 있습니다: ' +
+            (
+                (
+                    $externalSwitches |
+                        ForEach-Object {
+                            [string]$_['Name']
+                        }
+                ) -join ', '
+            )
+        )
+    }
+
+    [string]$externalSwitches[0]['Name']
+}
+
 function Get-LabVmPath {
     [CmdletBinding()]
     param(
@@ -850,6 +893,21 @@ function Get-LabVmPath {
             $Config['LabRoot'] `
             "VMs\$Name"
     }
+}
+
+function Get-LabVmActivationMarkerPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Name,
+
+        [System.Collections.IDictionary]$Config
+    )
+
+    Join-Path `
+        (Get-LabVmPath -Name $Name -Config $Config).VmPath `
+        '.labvm-activation-state'
 }
 
 function Get-LabStageSwitch {

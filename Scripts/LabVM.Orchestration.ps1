@@ -36,7 +36,13 @@ function New-LabVM {
         # New-LabStage처럼 이미 Get-LabConfig를 부른 호출자가 Stage 안의
         # VM마다 이 함수를 반복 호출할 때 넘겨서 재조회(및 재귀 딥카피)를
         # 피한다. 생략하면 이 함수가 직접 조회한다.
-        [System.Collections.IDictionary]$Config
+        [System.Collections.IDictionary]$Config,
+
+        [switch]$CompleteActivation,
+
+        [int]$ActivationTimeoutSeconds = 300,
+
+        [int]$ActivationGraceSeconds = 60
     )
 
     $cfg = if ($Config) {
@@ -349,6 +355,59 @@ function New-LabVM {
             -Force `
             -ErrorAction SilentlyContinue
 
+        $activationWarnings = @()
+
+        if ($CompleteActivation) {
+            try {
+                Start-VM `
+                    -Name $Spec.Name `
+                    -ErrorAction Stop
+
+                $activationResult = Complete-LabVmActivationIfNeeded `
+                    -Name @($Spec.Name) `
+                    -Config $cfg `
+                    -AdminPassword $AdminPassword `
+                    -TimeoutSeconds $ActivationTimeoutSeconds `
+                    -GraceSeconds $ActivationGraceSeconds
+
+                if (
+                    $activationResult -and
+                    $activationResult.TimedOutNames.Count -gt 0
+                ) {
+                    $activationWarnings += (
+                        "VM '$($Spec.Name)'이 평가판 활성화 임시 " +
+                        '네트워크에서 제한 시간 안에 IP를 받지 ' +
+                        "못했습니다. VM 디렉터리의 " +
+                        "'.labvm-activation-state' 파일을 지운 뒤 " +
+                        'Complete-LabVmActivation으로 다시 시도할 수 ' +
+                        '있습니다.'
+                    )
+                }
+                elseif (
+                    $activationResult -and
+                    $activationResult.Status -eq 'Completed'
+                ) {
+                    try {
+                        Stop-VM `
+                            -Name $Spec.Name `
+                            -ErrorAction Stop
+                    }
+                    catch {
+                        $activationWarnings += (
+                            "VM '$($Spec.Name)' 활성화 완료 후 종료 " +
+                            "실패: $($_.Exception.Message)"
+                        )
+                    }
+                }
+            }
+            catch {
+                $activationWarnings += (
+                    "VM '$($Spec.Name)' 평가판 활성화 자동 실행 " +
+                    "실패: $($_.Exception.Message)"
+                )
+            }
+        }
+
         return (
             New-LabVmResult `
                 -Name $Spec.Name `
@@ -356,7 +415,9 @@ function New-LabVM {
                 -Succeeded $true `
                 -Reason 'Created' `
                 -Warnings (
-                    @($warnings) + @($postCheck.Warnings)
+                    @($warnings) +
+                    @($postCheck.Warnings) +
+                    $activationWarnings
                 ) `
                 -CPU ([int]$Spec.CPU) `
                 -MemoryMB ([int64]$Spec.MemoryMB) `
@@ -597,7 +658,13 @@ function New-LabStage {
         # Conflict인 기존 VM 중 드리프트가 전부 Fixable인 것들을
         # New-LabVM -Reconcile로 교정한다. 자세한 내용은
         # New-LabVM -Reconcile 설명을 참고한다.
-        [switch]$Reconcile
+        [switch]$Reconcile,
+
+        [switch]$CompleteActivation,
+
+        [int]$ActivationTimeoutSeconds = 300,
+
+        [int]$ActivationGraceSeconds = 60
     )
 
     $cfg = Get-LabConfig
@@ -910,7 +977,10 @@ function New-LabStage {
                     -AdminPassword $AdminPassword `
                     -Reconcile:$Reconcile `
                     -Confirm:$false `
-                    -Config $cfg
+                    -Config $cfg `
+                    -CompleteActivation:$CompleteActivation `
+                    -ActivationTimeoutSeconds $ActivationTimeoutSeconds `
+                    -ActivationGraceSeconds $ActivationGraceSeconds
             )
 
             if ($vmOutput.Count -ne 1) {
@@ -1138,7 +1208,17 @@ function Start-LabStage {
 
         [string[]]$Also,
 
-        [switch]$Force
+        [switch]$Force,
+
+        [switch]$SkipActivation,
+
+        [securestring]$AdminPassword,
+
+        [ValidateRange(0, 3600)]
+        [int]$ActivationTimeoutSeconds = 300,
+
+        [ValidateRange(0, 600)]
+        [int]$ActivationGraceSeconds = 60
     )
 
     $cfg = Get-LabConfig
@@ -1485,6 +1565,30 @@ function Start-LabStage {
 
     $resultArray = @($results)
 
+    $activationResult = $null
+
+    if (-not $SkipActivation) {
+        $freshlyStartedNames = @(
+            $resultArray |
+                Where-Object {
+                    $_.Status -eq 'Started' -and
+                    $_.Reason -eq 'Started'
+                } |
+                ForEach-Object {
+                    [string]$_.Name
+                }
+        )
+
+        if ($freshlyStartedNames.Count -gt 0) {
+            $activationResult = Complete-LabVmActivationIfNeeded `
+                -Name $freshlyStartedNames `
+                -Config $cfg `
+                -AdminPassword $AdminPassword `
+                -TimeoutSeconds $ActivationTimeoutSeconds `
+                -GraceSeconds $ActivationGraceSeconds
+        }
+    }
+
     $stageStatus = Resolve-LabAggregateStatus `
         -Result $resultArray `
         -Priority 'Failed', 'Aborted', 'Started' `
@@ -1539,7 +1643,8 @@ function Start-LabStage {
             -Results $resultArray `
             -RequiredSwitches $requiredSwitches `
             -DependencyNames $dependencyNames `
-            -MemoryBudget $memoryBudget
+            -MemoryBudget $memoryBudget `
+            -ActivationResult $activationResult
     )
 }
 
@@ -1912,6 +2017,932 @@ function Stop-LabStage {
             -Reason $reason `
             -Results $resultArray
     )
+}
+
+function Grant-LabVmActivationNetwork {
+
+    [CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'ByStage')]
+    param(
+        [Parameter(Mandatory, ParameterSetName = 'ByStage')]
+        [string]$Stage,
+
+        [Parameter(ParameterSetName = 'ByStage')]
+        [string[]]$Also,
+
+        [Parameter(Mandatory, ParameterSetName = 'ByName')]
+        [ValidateNotNullOrEmpty()]
+        [string[]]$Name,
+
+        [System.Collections.IDictionary]$Config
+    )
+
+    $cfg = if ($Config) {
+        $Config
+    }
+    else {
+        Get-LabConfig
+    }
+
+    $externalSwitchName = Get-LabExternalSwitchName `
+        -Config $cfg
+
+    $stageLabel = if ($PSCmdlet.ParameterSetName -eq 'ByName') {
+        ''
+    }
+    else {
+        $Stage
+    }
+
+    $targetNames = @(
+        if ($PSCmdlet.ParameterSetName -eq 'ByName') {
+            @(
+                $Name |
+                    Select-LabNonEmptyString |
+                    Select-Object -Unique
+            )
+        }
+        else {
+            Assert-LabStageName `
+                -Stage $Stage `
+                -Config $cfg
+
+            $stageNames = @(
+                Resolve-LabSpec -Stage $Stage -Config $cfg |
+                    ForEach-Object {
+                        [string]$_['Name']
+                    }
+            )
+
+            $additionalNames = @(
+                foreach (
+                    $additionalName in
+                    @($Also | Select-LabNonEmptyString)
+                ) {
+                    $additionalSpec = Resolve-LabSingleSpec `
+                        -Name $additionalName `
+                        -Context '-Also 대상' `
+                        -Config $cfg
+
+                    [string]$additionalSpec['Name']
+                }
+            )
+
+            @(
+                $stageNames +
+                $additionalNames |
+                    Select-Object -Unique
+            )
+        }
+    )
+
+    if ($targetNames.Count -eq 0) {
+        return (
+            New-LabStageActivationGrantResult `
+                -Stage $stageLabel `
+                -Status Skipped `
+                -Succeeded $true `
+                -Reason 'NoVmDefinitions'
+        )
+    }
+
+    $hostVmIndex = Get-LabHostVmNameIndex
+    $hostVmsByName = $hostVmIndex.ByName
+
+    $results =
+        [Collections.Generic.List[object]]::new()
+
+    foreach ($targetName in $targetNames) {
+        if ($hostVmIndex.DuplicateNames -contains $targetName) {
+            $results.Add(
+                (
+                    New-LabVmActivationGrantResult `
+                        -Name $targetName `
+                        -Status Failed `
+                        -Succeeded $false `
+                        -Reason 'AmbiguousVmName' `
+                        -Issues @(
+                            "동일한 이름의 Hyper-V VM이 여러 개 있습니다: $targetName"
+                        ) `
+                        -ErrorMessage '동일한 이름의 Hyper-V VM이 여러 개 있습니다.'
+                )
+            )
+
+            continue
+        }
+
+        $spec = Resolve-LabSingleSpec `
+            -Name $targetName `
+            -Config $cfg
+
+        if (@($spec['Switch']) -contains $externalSwitchName) {
+            $results.Add(
+                (
+                    New-LabVmActivationGrantResult `
+                        -Name $targetName `
+                        -Status Skipped `
+                        -Succeeded $true `
+                        -Reason 'AlreadyExternallyConnected' `
+                        -SwitchName $externalSwitchName
+                )
+            )
+
+            continue
+        }
+
+        $vm = $hostVmsByName[$targetName]
+
+        if (-not $vm) {
+            $results.Add(
+                (
+                    New-LabVmActivationGrantResult `
+                        -Name $targetName `
+                        -Status Skipped `
+                        -Succeeded $true `
+                        -Reason 'VmNotFound'
+                )
+            )
+
+            continue
+        }
+
+        $existingAdapter = Get-VMNetworkAdapter `
+            -VMName $targetName `
+            -Name $script:LabActivationAdapterName `
+            -ErrorAction SilentlyContinue
+
+        if ($existingAdapter) {
+            $results.Add(
+                (
+                    New-LabVmActivationGrantResult `
+                        -Name $targetName `
+                        -Status Skipped `
+                        -Succeeded $true `
+                        -Reason 'AlreadyGranted' `
+                        -SwitchName $externalSwitchName
+                )
+            )
+
+            continue
+        }
+
+        if (
+            -not $PSCmdlet.ShouldProcess(
+                $targetName,
+                "평가판 활성화용 '$externalSwitchName' 임시 연결"
+            )
+        ) {
+            $results.Add(
+                (
+                    New-LabVmActivationGrantResult `
+                        -Name $targetName `
+                        -Status Skipped `
+                        -Succeeded $true `
+                        -Reason 'ShouldProcessDeclined'
+                )
+            )
+
+            continue
+        }
+
+        try {
+            Add-VMNetworkAdapter `
+                -VMName $targetName `
+                -Name $script:LabActivationAdapterName `
+                -SwitchName $externalSwitchName `
+                -ErrorAction Stop |
+                Out-Null
+
+            $results.Add(
+                (
+                    New-LabVmActivationGrantResult `
+                        -Name $targetName `
+                        -Status Granted `
+                        -Succeeded $true `
+                        -Reason 'Granted' `
+                        -SwitchName $externalSwitchName
+                )
+            )
+        }
+        catch {
+            $grantMessage = (
+                "VM '$targetName'에 임시 어댑터 연결 실패: " +
+                $_.Exception.Message
+            )
+
+            Write-Warning $grantMessage
+
+            $results.Add(
+                (
+                    New-LabVmActivationGrantResult `
+                        -Name $targetName `
+                        -Status Failed `
+                        -Succeeded $false `
+                        -Reason 'GrantException' `
+                        -Issues @($grantMessage) `
+                        -ErrorMessage $_.Exception.Message
+                )
+            )
+        }
+    }
+
+    $resultArray = @($results)
+
+    $stageStatus = Resolve-LabAggregateStatus `
+        -Result $resultArray `
+        -Priority 'Failed', 'Granted' `
+        -DefaultStatus 'Skipped'
+
+    $reason = switch ($stageStatus) {
+        'Granted' {
+            'Completed'
+        }
+
+        'Skipped' {
+            $declined = Get-LabStatusCount `
+                -Result $resultArray `
+                -Status 'ShouldProcessDeclined' `
+                -Property 'Reason'
+
+            if (
+                $resultArray.Count -gt 0 -and
+                $declined -eq $resultArray.Count
+            ) {
+                'ShouldProcessDeclined'
+            }
+            else {
+                'AlreadyCompliant'
+            }
+        }
+
+        'Failed' {
+            'GrantFailed'
+        }
+    }
+
+    return (
+        New-LabStageActivationGrantResult `
+            -Stage $stageLabel `
+            -Status $stageStatus `
+            -Succeeded (
+                @(
+                    $resultArray |
+                        Where-Object {
+                            -not $_.Succeeded
+                        }
+                ).Count -eq 0
+            ) `
+            -Reason $reason `
+            -Results $resultArray
+    )
+}
+
+function Revoke-LabVmActivationNetwork {
+    [CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'ByStage')]
+    param(
+        [Parameter(Mandatory, ParameterSetName = 'ByStage')]
+        [string]$Stage,
+
+        [Parameter(ParameterSetName = 'ByStage')]
+        [string[]]$Also,
+
+        [Parameter(Mandatory, ParameterSetName = 'ByName')]
+        [ValidateNotNullOrEmpty()]
+        [string[]]$Name,
+
+        [System.Collections.IDictionary]$Config
+    )
+
+    $cfg = if ($Config) {
+        $Config
+    }
+    else {
+        Get-LabConfig
+    }
+
+    $stageLabel = if ($PSCmdlet.ParameterSetName -eq 'ByName') {
+        ''
+    }
+    else {
+        $Stage
+    }
+
+    $targetNames = @(
+        if ($PSCmdlet.ParameterSetName -eq 'ByName') {
+            @(
+                $Name |
+                    Select-LabNonEmptyString |
+                    Select-Object -Unique
+            )
+        }
+        else {
+            Assert-LabStageName `
+                -Stage $Stage `
+                -Config $cfg
+
+            $stageNames = @(
+                Resolve-LabSpec -Stage $Stage -Config $cfg |
+                    ForEach-Object {
+                        [string]$_['Name']
+                    }
+            )
+
+            $additionalNames = @(
+                foreach (
+                    $additionalName in
+                    @($Also | Select-LabNonEmptyString)
+                ) {
+                    $additionalSpec = Resolve-LabSingleSpec `
+                        -Name $additionalName `
+                        -Context '-Also 대상' `
+                        -Config $cfg
+
+                    [string]$additionalSpec['Name']
+                }
+            )
+
+            @(
+                $stageNames +
+                $additionalNames |
+                    Select-Object -Unique
+            )
+        }
+    )
+
+    if ($targetNames.Count -eq 0) {
+        return (
+            New-LabStageActivationRevokeResult `
+                -Stage $stageLabel `
+                -Status Skipped `
+                -Succeeded $true `
+                -Reason 'NoVmDefinitions'
+        )
+    }
+
+    $hostVmIndex = Get-LabHostVmNameIndex
+    $hostVmsByName = $hostVmIndex.ByName
+
+    $results =
+        [Collections.Generic.List[object]]::new()
+
+    foreach ($targetName in $targetNames) {
+        if ($hostVmIndex.DuplicateNames -contains $targetName) {
+            $results.Add(
+                (
+                    New-LabVmActivationRevokeResult `
+                        -Name $targetName `
+                        -Status Failed `
+                        -Succeeded $false `
+                        -Reason 'AmbiguousVmName' `
+                        -Issues @(
+                            "동일한 이름의 Hyper-V VM이 여러 개 있습니다: $targetName"
+                        ) `
+                        -ErrorMessage '동일한 이름의 Hyper-V VM이 여러 개 있습니다.'
+                )
+            )
+
+            continue
+        }
+
+        $vm = $hostVmsByName[$targetName]
+
+        if (-not $vm) {
+            $results.Add(
+                (
+                    New-LabVmActivationRevokeResult `
+                        -Name $targetName `
+                        -Status Skipped `
+                        -Succeeded $true `
+                        -Reason 'VmNotFound'
+                )
+            )
+
+            continue
+        }
+
+        $adapter = Get-VMNetworkAdapter `
+            -VMName $targetName `
+            -Name $script:LabActivationAdapterName `
+            -ErrorAction SilentlyContinue
+
+        if (-not $adapter) {
+            $results.Add(
+                (
+                    New-LabVmActivationRevokeResult `
+                        -Name $targetName `
+                        -Status Skipped `
+                        -Succeeded $true `
+                        -Reason 'AlreadyAbsent'
+                )
+            )
+
+            continue
+        }
+
+        if (
+            -not $PSCmdlet.ShouldProcess(
+                $targetName,
+                '평가판 활성화용 임시 어댑터 제거'
+            )
+        ) {
+            $results.Add(
+                (
+                    New-LabVmActivationRevokeResult `
+                        -Name $targetName `
+                        -Status Skipped `
+                        -Succeeded $true `
+                        -Reason 'ShouldProcessDeclined'
+                )
+            )
+
+            continue
+        }
+
+        try {
+            Remove-VMNetworkAdapter `
+                -VMNetworkAdapter $adapter `
+                -ErrorAction Stop
+
+            $results.Add(
+                (
+                    New-LabVmActivationRevokeResult `
+                        -Name $targetName `
+                        -Status Revoked `
+                        -Succeeded $true `
+                        -Reason 'Revoked'
+                )
+            )
+        }
+        catch {
+            $revokeMessage = (
+                "VM '$targetName'의 임시 어댑터 제거 실패: " +
+                $_.Exception.Message
+            )
+
+            Write-Warning $revokeMessage
+
+            $results.Add(
+                (
+                    New-LabVmActivationRevokeResult `
+                        -Name $targetName `
+                        -Status Failed `
+                        -Succeeded $false `
+                        -Reason 'RevokeException' `
+                        -Issues @($revokeMessage) `
+                        -ErrorMessage $_.Exception.Message
+                )
+            )
+        }
+    }
+
+    $resultArray = @($results)
+
+    $stageStatus = Resolve-LabAggregateStatus `
+        -Result $resultArray `
+        -Priority 'Failed', 'Revoked' `
+        -DefaultStatus 'Skipped'
+
+    $reason = switch ($stageStatus) {
+        'Revoked' {
+            'Completed'
+        }
+
+        'Skipped' {
+            $declined = Get-LabStatusCount `
+                -Result $resultArray `
+                -Status 'ShouldProcessDeclined' `
+                -Property 'Reason'
+
+            if (
+                $resultArray.Count -gt 0 -and
+                $declined -eq $resultArray.Count
+            ) {
+                'ShouldProcessDeclined'
+            }
+            else {
+                'AlreadyAbsent'
+            }
+        }
+
+        'Failed' {
+            'RevokeFailed'
+        }
+    }
+
+    return (
+        New-LabStageActivationRevokeResult `
+            -Stage $stageLabel `
+            -Status $stageStatus `
+            -Succeeded (
+                @(
+                    $resultArray |
+                        Where-Object {
+                            -not $_.Succeeded
+                        }
+                ).Count -eq 0
+            ) `
+            -Reason $reason `
+            -Results $resultArray
+    )
+}
+
+function Complete-LabVmActivation {
+
+    [CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'ByStage')]
+    param(
+        [Parameter(Mandatory, ParameterSetName = 'ByStage')]
+        [string]$Stage,
+
+        [Parameter(ParameterSetName = 'ByStage')]
+        [string[]]$Also,
+
+        [Parameter(Mandatory, ParameterSetName = 'ByName')]
+        [ValidateNotNullOrEmpty()]
+        [string[]]$Name,
+
+        [securestring]$AdminPassword,
+
+        # 활성화를 확인할 때까지 기다리는 최대 시간.
+        [ValidateRange(0, 3600)]
+        [int]$TimeoutSeconds = 300,
+
+        [ValidateRange(0, 600)]
+        [int]$GraceSeconds = 60,
+
+        [ValidateRange(1, 60)]
+        [int]$PollIntervalSeconds = 5,
+
+        [System.Collections.IDictionary]$Config
+    )
+
+    $cfg = if ($Config) {
+        $Config
+    }
+    else {
+        Get-LabConfig
+    }
+
+    $stageLabel = if ($PSCmdlet.ParameterSetName -eq 'ByName') {
+        ''
+    }
+    else {
+        $Stage
+    }
+
+    $targetSplat = if ($PSCmdlet.ParameterSetName -eq 'ByName') {
+        @{ Name = $Name }
+    }
+    else {
+        @{ Stage = $Stage; Also = $Also }
+    }
+
+    $targetSplat['Config'] = $cfg
+
+    if (
+        -not $PSCmdlet.ShouldProcess(
+            $(
+                if ($PSCmdlet.ParameterSetName -eq 'ByName') {
+                    $Name -join ', '
+                }
+                else {
+                    $Stage
+                }
+            ),
+            '평가판 활성화용 임시 네트워크 연결 -> 대기 -> 해제'
+        )
+    ) {
+        return (
+            New-LabVmActivationCompletionResult `
+                -Stage $stageLabel `
+                -Status Skipped `
+                -Succeeded $true `
+                -Reason 'ShouldProcessDeclined'
+        )
+    }
+
+    $grantResult = Grant-LabVmActivationNetwork `
+        @targetSplat `
+        -Confirm:$false
+
+    $pendingNames =
+        [Collections.Generic.List[string]]::new()
+
+    foreach (
+        $pendingName in
+        @(
+            $grantResult.Results |
+                Where-Object {
+                    $_.Status -eq 'Granted'
+                } |
+                ForEach-Object {
+                    [string]$_.Name
+                }
+        )
+    ) {
+        $pendingNames.Add($pendingName)
+    }
+
+    if ($pendingNames.Count -gt 0) {
+        if ($AdminPassword) {
+            # PowerShell Direct로 게스트에 직접 들어가 실제 라이선스
+            # 상태를 확인하고, 필요하면 slmgr.vbs /ato로 트리거한다.
+            # VM마다 계정 모드(BuiltInAdministrator vs LocalAccount)가
+            # 다를 수 있으므로 자격 증명은 VM별로 계산해 캐시한다.
+            $credentialCache = @{}
+
+            $activationCheckScript = {
+                $product = Get-CimInstance `
+                    -ClassName SoftwareLicensingProduct `
+                    -Filter 'PartialProductKey is not null' `
+                    -ErrorAction Stop |
+                    Where-Object {
+                        $_.Name -like 'Windows*'
+                    } |
+                    Select-Object -First 1
+
+                if ($product -and $product.LicenseStatus -ne 1) {
+                    & cscript.exe //nologo `
+                        "$env:windir\System32\slmgr.vbs" `
+                        /ato |
+                        Out-Null
+
+                    Start-Sleep -Seconds 5
+
+                    $product = Get-CimInstance `
+                        -ClassName SoftwareLicensingProduct `
+                        -Filter 'PartialProductKey is not null' `
+                        -ErrorAction Stop |
+                        Where-Object {
+                            $_.Name -like 'Windows*'
+                        } |
+                        Select-Object -First 1
+                }
+
+                [bool](
+                    $product -and
+                    $product.LicenseStatus -eq 1
+                )
+            }
+
+            $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+
+            while (
+                $pendingNames.Count -gt 0 -and
+                (Get-Date) -lt $deadline
+            ) {
+                foreach ($pendingName in @($pendingNames)) {
+                    if (-not $credentialCache.Contains($pendingName)) {
+                        try {
+                            $spec = Resolve-LabSingleSpec `
+                                -Name $pendingName `
+                                -Config $cfg
+
+                            $template = Resolve-LabTemplate `
+                                -Name ([string]$spec['Template']) `
+                                -Config $cfg
+
+                            $username = if (
+                                $template.AccountMode -eq
+                                'BuiltInAdministrator'
+                            ) {
+                                'Administrator'
+                            }
+                            else {
+                                [string]$cfg['LocalAdminName']
+                            }
+
+                            $credentialCache[$pendingName] = [pscredential]::new(
+                                $username,
+                                $AdminPassword
+                            )
+                        }
+                        catch {
+                            # 자격 증명을 계산할 수 없으면(예: 정의되지
+                            # 않은 템플릿) 이번 폴링에서는 건너뛰고
+                            # 다음 폴링에서 다시 시도한다.
+                            continue
+                        }
+                    }
+
+                    try {
+                        $licensed = Invoke-Command `
+                            -VMName $pendingName `
+                            -Credential $credentialCache[$pendingName] `
+                            -ScriptBlock $activationCheckScript `
+                            -ErrorAction Stop
+                    }
+                    catch {
+                        # 아직 부팅 중이거나 통합 서비스가 준비되지
+                        # 않아 PowerShell Direct 연결이 실패하는 것은
+                        # 일시적일 수 있으므로 다음 폴링에서 다시
+                        # 시도한다.
+                        $licensed = $false
+                    }
+
+                    if ($licensed) {
+                        [void]$pendingNames.Remove($pendingName)
+                    }
+                }
+
+                if ($pendingNames.Count -gt 0) {
+                    Start-Sleep -Seconds $PollIntervalSeconds
+                }
+            }
+        }
+        else {
+            $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+
+            while (
+                $pendingNames.Count -gt 0 -and
+                (Get-Date) -lt $deadline
+            ) {
+                foreach ($pendingName in @($pendingNames)) {
+                    $adapter = Get-VMNetworkAdapter `
+                        -VMName $pendingName `
+                        -Name $script:LabActivationAdapterName `
+                        -ErrorAction SilentlyContinue
+
+                    # 링크 로컬(169.254.x.x, fe80::)은 DHCP를 받지 못한
+                    # 상태이므로 "아직 나갈 수 없다"로 취급한다.
+                    $hasUsableAddress = @(
+                        $adapter.IPAddresses |
+                            Where-Object {
+                                $_ -and
+                                $_ -ne '0.0.0.0' -and
+                                $_ -notlike '169.254.*' -and
+                                $_ -notlike 'fe80:*'
+                            }
+                    ).Count -gt 0
+
+                    if ($hasUsableAddress) {
+                        [void]$pendingNames.Remove($pendingName)
+                    }
+                }
+
+                if ($pendingNames.Count -gt 0) {
+                    Start-Sleep -Seconds $PollIntervalSeconds
+                }
+            }
+
+            if ($GraceSeconds -gt 0) {
+                Start-Sleep -Seconds $GraceSeconds
+            }
+        }
+    }
+
+    $timedOutNames = @($pendingNames)
+
+    $revokeResult = Revoke-LabVmActivationNetwork `
+        @targetSplat `
+        -Confirm:$false
+
+    $succeeded = (
+        $grantResult.Succeeded -and
+        $revokeResult.Succeeded
+    )
+
+    $status = if (-not $succeeded) {
+        'Failed'
+    }
+    elseif ($timedOutNames.Count -gt 0) {
+        'TimedOut'
+    }
+    elseif ($grantResult.Reason -eq 'NoVmDefinitions') {
+        'Skipped'
+    }
+    else {
+        'Completed'
+    }
+
+    $reason = switch ($status) {
+        'Failed' {
+            if (-not $grantResult.Succeeded) {
+                'GrantFailed'
+            }
+            else {
+                'RevokeFailed'
+            }
+        }
+
+        'TimedOut' {
+            'ActivationWaitTimedOut'
+        }
+
+        'Skipped' {
+            'NoVmDefinitions'
+        }
+
+        'Completed' {
+            'Completed'
+        }
+    }
+
+    return (
+        New-LabVmActivationCompletionResult `
+            -Stage $stageLabel `
+            -Status $status `
+            -Succeeded $succeeded `
+            -Reason $reason `
+            -GrantResult $grantResult `
+            -RevokeResult $revokeResult `
+            -TimedOutNames $timedOutNames
+    )
+}
+
+function Complete-LabVmActivationIfNeeded {
+
+    [CmdletBinding()]
+    [OutputType([psobject])]
+    param(
+        [Parameter(Mandatory)]
+        [string[]]$Name,
+
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary]$Config,
+
+        [securestring]$AdminPassword,
+
+        [int]$TimeoutSeconds = 300,
+
+        [int]$GraceSeconds = 60
+    )
+
+    $externalSwitchName = $null
+
+    try {
+        $externalSwitchName = Get-LabExternalSwitchName `
+            -Config $Config
+    }
+    catch {
+        # External 스위치가 정의되지 않은 환경(순수 격리 랩, 테스트
+        # 등)에서는 활성화 자동화를 조용히 건너뛴다.
+        return $null
+    }
+
+    $pendingNames = @(
+        foreach ($vmName in $Name) {
+            $spec = Resolve-LabSingleSpec `
+                -Name $vmName `
+                -Config $Config
+
+            if (@($spec['Switch']) -contains $externalSwitchName) {
+                continue
+            }
+
+            $markerPath = Get-LabVmActivationMarkerPath `
+                -Name $vmName `
+                -Config $Config
+
+            if (Test-Path -LiteralPath $markerPath) {
+                continue
+            }
+
+            $vmName
+        }
+    )
+
+    if ($pendingNames.Count -eq 0) {
+        return $null
+    }
+
+    $activationResult = Complete-LabVmActivation `
+        -Name $pendingNames `
+        -AdminPassword $AdminPassword `
+        -TimeoutSeconds $TimeoutSeconds `
+        -GraceSeconds $GraceSeconds `
+        -Config $Config `
+        -Confirm:$false
+
+    foreach ($vmName in $pendingNames) {
+        $markerStatus = if (
+            $activationResult.TimedOutNames -contains $vmName
+        ) {
+            'TimedOut'
+        }
+        else {
+            'Completed'
+        }
+
+        try {
+            Set-Content `
+                -LiteralPath (
+                    Get-LabVmActivationMarkerPath `
+                        -Name $vmName `
+                        -Config $Config
+                ) `
+                -Value "$markerStatus $(Get-Date -Format o)" `
+                -Encoding Ascii `
+                -NoNewline `
+                -ErrorAction Stop
+        }
+        catch {
+            Write-Warning (
+                "VM '$vmName'의 활성화 상태 마커 기록 " +
+                "실패: $($_.Exception.Message)"
+            )
+        }
+    }
+
+    $activationResult
 }
 
 function Get-LabStatus {

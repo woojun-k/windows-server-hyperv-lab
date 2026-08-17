@@ -265,6 +265,148 @@
     </View>
 
     <View>
+      <Name>Lab.VmActivationGrantResult</Name>
+      <ViewSelectedBy>
+        <TypeName>Lab.VmActivationGrantResult</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <AutoSize />
+        <TableHeaders>
+          <TableColumnHeader><Label>Name</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Status</Label></TableColumnHeader>
+          <TableColumnHeader><Label>SwitchName</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Reason</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>Name</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Status</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>SwitchName</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Reason</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>Lab.StageActivationGrantResult</Name>
+      <ViewSelectedBy>
+        <TypeName>Lab.StageActivationGrantResult</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <AutoSize />
+        <TableHeaders>
+          <TableColumnHeader><Label>Stage</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Status</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Reason</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Granted</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Skipped</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Failed</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>Stage</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Status</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Reason</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>GrantedCount</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>SkippedCount</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>FailedCount</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>Lab.VmActivationRevokeResult</Name>
+      <ViewSelectedBy>
+        <TypeName>Lab.VmActivationRevokeResult</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <AutoSize />
+        <TableHeaders>
+          <TableColumnHeader><Label>Name</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Status</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Reason</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>Name</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Status</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Reason</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>Lab.StageActivationRevokeResult</Name>
+      <ViewSelectedBy>
+        <TypeName>Lab.StageActivationRevokeResult</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <AutoSize />
+        <TableHeaders>
+          <TableColumnHeader><Label>Stage</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Status</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Reason</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Revoked</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Skipped</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Failed</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>Stage</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Status</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Reason</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>RevokedCount</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>SkippedCount</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>FailedCount</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>Lab.VmActivationCompletionResult</Name>
+      <ViewSelectedBy>
+        <TypeName>Lab.VmActivationCompletionResult</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <AutoSize />
+        <TableHeaders>
+          <TableColumnHeader><Label>Stage</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Status</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Reason</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Granted</Label></TableColumnHeader>
+          <TableColumnHeader><Label>TimedOut</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>Stage</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Status</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Reason</PropertyName></TableColumnItem>
+              <TableColumnItem>
+                <ScriptBlock>if ($_.GrantResult) { $_.GrantResult.GrantedCount } else { 0 }</ScriptBlock>
+              </TableColumnItem>
+              <TableColumnItem>
+                <ScriptBlock>@($_.TimedOutNames) -join ', '</ScriptBlock>
+              </TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
       <Name>Lab.PrerequisiteResult</Name>
       <ViewSelectedBy>
         <TypeName>Lab.PrerequisiteResult</TypeName>

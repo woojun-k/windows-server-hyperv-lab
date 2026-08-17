@@ -34,6 +34,15 @@
         'nested-core'
     )
 
+    # key로 지정한 Stage를 Start-LabStage로 시작할 때 자동으로 함께
+    # 켜야 하는 VM 이름. 직접 의존만 적으면 되고(전이 의존은
+    # Get-LabStageDependencyClosure가 재귀로 풀어낸다), StageOrder에는
+    # 있지만 여기 키가 없는 Stage는 의존성이 없는 것으로 취급한다.
+    StageDependencies = @{
+        addc        = @('RRAS01')
+        'addc-core' = @('RRAS-C01')
+    }
+
     Templates = @{
         GUI = @{
             Vhd         = 'Templates\WS25-BASE-GUI.vhdx'
@@ -66,6 +75,7 @@
         @{ Name = 'LAB-External'; Type = 'External'; Stage = 'rras'   }
         @{ Name = 'LAB-DMZ';      Type = 'Private'; Stage = 'rras'   }
         @{ Name = 'LAB-Egress';   Type = 'Private';  Stage = 'rras' }
+        @{ Name = 'LAB-Branch';   Type = 'Private';  Stage = 'rras' }
         @{ Name = 'LAB-Nested';   Type = 'Private';  Stage = 'nested' }
     )
 
@@ -84,7 +94,8 @@
                 'LAB-External',
                 'LAB-Internal',
                 'LAB-DMZ',
-                'LAB-Egress'
+                'LAB-Egress',
+                'LAB-Branch'
             )
         }
 
@@ -102,7 +113,8 @@
                 'LAB-External',
                 'LAB-Internal',
                 'LAB-DMZ',
-                'LAB-Egress'
+                'LAB-Egress',
+                'LAB-Branch'
             )
         }
 
@@ -188,6 +200,15 @@
             CPU      = 2
             MemoryMB = 4096
             Switch   = @('LAB-Internal')
+        }
+
+        @{
+            Name     = 'CLIENT02'
+            Stage    = 'dhcp'
+            Template = 'WIN11'
+            CPU      = 2
+            MemoryMB = 4096
+            Switch   = @('LAB-Branch')
         }
 
         # ============================================================

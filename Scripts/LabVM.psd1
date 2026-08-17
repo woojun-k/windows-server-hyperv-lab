@@ -19,6 +19,9 @@
         'Reset-LabStage',
         'Start-LabStage',
         'Stop-LabStage',
+        'Grant-LabVmActivationNetwork',
+        'Revoke-LabVmActivationNetwork',
+        'Complete-LabVmActivation',
         'Get-LabStatus'
     )
     CmdletsToExport   = @()

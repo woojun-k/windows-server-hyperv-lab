@@ -162,7 +162,23 @@ New-VMSwitch `
 ```powershell
 New-VMSwitch `
     -Name 'LAB-DMZ' `
-    -SwitchType Internal
+    -SwitchType Private
+```
+
+### Egress
+
+```powershell
+New-VMSwitch `
+    -Name 'LAB-Egress' `
+    -SwitchType Private
+```
+
+### Branch (원격 서브넷)
+
+```powershell
+New-VMSwitch `
+    -Name 'LAB-Branch' `
+    -SwitchType Private
 ```
 
 ### 중첩 Hyper-V 전용망
@@ -341,7 +357,14 @@ $result
 $result | Format-List *
 ```
 
-생성된 VM은 자동으로 시작되지 않습니다.
+생성된 VM은 자동으로 시작되지 않습니다. 시작과 동시에 평가판 활성화까지 그 자리에서 끝내려면 `-CompleteActivation`을 추가합니다.
+
+```powershell
+New-LabVM `
+    -Name 'DC01' `
+    -AdminPassword $AdminPassword `
+    -CompleteActivation
+```
 
 ---
 
@@ -380,6 +403,15 @@ Stage 생성은 다음 순서로 동작합니다.
 4. 모든 검사가 통과하면 생성 시작
 5. 생성 도중 실패하면 이번 실행에서 생성한 VM 롤백
 
+새로 생성되는 VM마다 그 자리에서 시작과 평가판 활성화까지 끝내려면 `-CompleteActivation`을 추가합니다.
+
+```powershell
+New-LabStage `
+    -Stage addc `
+    -AdminPassword $AdminPassword `
+    -CompleteActivation
+```
+
 이미 모든 VM이 설정과 일치하면 `Skipped / AlreadyCompliant`를 반환합니다.
 
 ---
@@ -400,12 +432,22 @@ Start-LabStage `
     -Also RRAS01, DC01
 ```
 
+`LabConfig.psd1`의 `StageDependencies`에 선언된 VM(예: `addc`가 요구하는 `RRAS01`)은 Stage 자체 VM보다 먼저 자동으로 함께 시작됩니다. 이미 실행 중이면 `AlreadyRunning`으로 건너뜁니다.
+
 `Start-LabStage`는 필요한 스위치와 VM 존재 여부, 호스트 메모리 예산을 검사합니다. 메모리 예산 차단을 의도적으로 무시할 때만 `-Force`를 사용합니다.
 
 ```powershell
 Start-LabStage `
     -Stage wsus `
     -Force
+```
+
+새로 시작된 VM 중 평가판 활성화가 필요한 VM에는 임시 External 연결도 자동으로 처리됩니다(아래 [평가판 활성화용 임시 External 연결](#평가판-활성화용-임시-external-연결) 참고). 이 처리를 끄려면 `-SkipActivation`을 사용합니다.
+
+```powershell
+Start-LabStage `
+    -Stage addc `
+    -SkipActivation
 ```
 
 정상 종료:
@@ -424,6 +466,8 @@ Stop-LabStage `
 ```
 
 `-TurnOff`는 정상 종료 절차를 건너뛰므로 응답하지 않는 VM에만 사용하십시오.
+
+`Stop-LabStage`도 `StageDependencies`로 자동 시작됐던 VM을 Stage 자체 VM 다음에 이어서 끕니다. 다만 그 VM을 다른 Stage가 아직 쓰는 중이면(그 Stage 소유 VM이 하나라도 실행 중이면) 건너뛰고 `Reason = StillRequiredByStage`를 반환합니다. 예를 들어 `addc`가 실행 중일 때 `Stop-LabStage -Stage rras`를 실행해도 `RRAS01`은 꺼지지 않습니다. 이 보호를 무시하고 정말 끄려면 `-Force`를 사용합니다.
 
 ---
 
@@ -534,11 +578,11 @@ New-LabVM `
 | Stage | VM | 필요 스위치 |
 |---|---|---|
 | `base` | `없음` | LAB-Internal |
-| `rras` | `RRAS01` | External, Internal, DMZ, Egress |
-| `rras-core` | `RRAS-C01` | External, Internal, DMZ, Egress |
+| `rras` | `RRAS01` | External, Internal, DMZ, Egress, Branch |
+| `rras-core` | `RRAS-C01` | External, Internal, DMZ, Egress, Branch |
 | `addc` | `DC01`, `DC02`, `MGMT01`, `CLIENT01` | Internal |
 | `addc-core` | `DC-C01`, `DC-C02` | Internal |
-| `dhcp` | `DHCP01`, `DHCP02` | Internal |
+| `dhcp` | `DHCP01`, `DHCP02`, `CLIENT02` | Internal, Branch |
 | `dhcp-core` | `DHCP-C01`, `DHCP-C02` | Internal |
 | `wsus` | `WSUS01` | Internal |
 | `wsus-core` | `WSUS-C01` | Internal |
@@ -554,6 +598,8 @@ New-LabVM `
 | `fs-core` | `FS-C01` | Internal |
 | `nested` | `HV01`, `HV02` | Internal, Nested |
 | `nested-core` | `HV-C01`, `HV-C02` | Internal, Nested |
+
+`addc`는 `RRAS01`을(를), `addc-core`는 `RRAS-C01`을(를) `StageDependencies`로 요구합니다. `RRAS01`은 내부망 전체의 기본 게이트웨이이므로 `Start-LabStage -Stage addc` 한 번으로 `RRAS01`도 함께 시작됩니다.
 
 ---
 
@@ -589,7 +635,8 @@ New-LabStage `
     -Stage addc `
     -AdminPassword $AdminPassword
 
-Start-LabStage -Stage rras
+# addc가 StageDependencies로 RRAS01을 요구하므로,
+# 아래 한 줄로 RRAS01과 addc의 VM이 함께 시작됩니다.
 Start-LabStage -Stage addc
 ```
 
@@ -597,9 +644,15 @@ Start-LabStage -Stage addc
 
 ```powershell
 New-LabStage `
+    -Stage rras-core `
+    -AdminPassword $AdminPassword
+
+New-LabStage `
     -Stage addc-core `
     -AdminPassword $AdminPassword
 
+# addc-core가 StageDependencies로 RRAS-C01을 요구하므로,
+# 아래 한 줄로 RRAS-C01과 addc-core의 VM이 함께 시작됩니다.
 Start-LabStage -Stage addc-core
 ```
 

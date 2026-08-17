@@ -690,13 +690,21 @@ function Invoke-LabVmRemovalExecution {
         # 사전 검사 이후 다른 프로세스가 파일을 새로 만든 경쟁
         # 조건에 대비해, 디렉터리 안에 남은 파일이 없을 때만
         # 재귀 삭제한다. 남은 파일이 있으면 통째로 보존한다.
+        $labOwnedMarkerNames = @(
+            '.labvm-creation-owner',
+            '.labvm-activation-state'
+        )
+
         $remainingVmPathFiles = @(
             Get-ChildItem `
                 -LiteralPath $ExpectedVmPath `
                 -Force `
                 -Recurse `
                 -File `
-                -ErrorAction Stop
+                -ErrorAction Stop |
+                Where-Object {
+                    $_.Name -notin $labOwnedMarkerNames
+                }
         )
 
         if ($remainingVmPathFiles.Count -eq 0) {

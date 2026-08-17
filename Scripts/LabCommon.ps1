@@ -18,6 +18,8 @@ $script:ComputerNamePattern =
 $script:LocalAdminNamePattern =
     '^(?![. ]+$)(?! )(?!.*\.$)(?!(?i:Administrator|Guest)$)[^"/\\[\]:;|=,+*?<>@]{1,20}$'
 
+$script:LabActivationAdapterName = 'LAB-Activation'
+
 
 # ----------------------------------------------------------------
 # 값과 문자열

@@ -325,6 +325,305 @@ function New-LabStageResetResult {
     }
 }
 
+function New-LabVmActivationGrantResult {
+    [CmdletBinding()]
+    [Diagnostics.CodeAnalysis.SuppressMessage(
+        'PSUseShouldProcessForStateChangingFunctions',
+        '',
+        Justification = '메모리 내 결과 객체만 생성하며 외부 상태를 변경하지 않는다.'
+    )]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Name,
+
+        [Parameter(Mandatory)]
+        [ValidateSet(
+            'Granted',
+            'Skipped',
+            'Failed'
+        )]
+        [string]$Status,
+
+        [Parameter(Mandatory)]
+        [bool]$Succeeded,
+
+        [ValidateSet(
+            'AlreadyExternallyConnected',
+            'AlreadyGranted',
+            'VmNotFound',
+            'AmbiguousVmName',
+            'ShouldProcessDeclined',
+            'Granted',
+            'GrantException'
+        )]
+        [string]$Reason,
+
+        [string]$SwitchName,
+
+        [object[]]$Issues = @(),
+
+        [string]$ErrorMessage
+    )
+
+    Assert-LabResultContract `
+        -Kind 'VM 활성화 네트워크 연결 결과' `
+        -Status $Status `
+        -Succeeded $Succeeded `
+        -SuccessStatus 'Granted', 'Skipped'
+
+    [pscustomobject]@{
+        PSTypeName = 'Lab.VmActivationGrantResult'
+        Name       = $Name
+        Status     = $Status
+        Succeeded  = $Succeeded
+        Reason     = $Reason
+        SwitchName = $SwitchName
+        Issues     = @($Issues)
+        Error      = $ErrorMessage
+    }
+}
+
+function New-LabStageActivationGrantResult {
+    [CmdletBinding()]
+    [Diagnostics.CodeAnalysis.SuppressMessage(
+        'PSUseShouldProcessForStateChangingFunctions',
+        '',
+        Justification = '메모리 내 결과 객체만 생성하며 외부 상태를 변경하지 않는다.'
+    )]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Stage,
+
+        [Parameter(Mandatory)]
+        [ValidateSet(
+            'Granted',
+            'Skipped',
+            'Failed'
+        )]
+        [string]$Status,
+
+        [Parameter(Mandatory)]
+        [bool]$Succeeded,
+
+        [ValidateSet(
+            'NoVmDefinitions',
+            'ShouldProcessDeclined',
+            'AlreadyCompliant',
+            'Completed',
+            'GrantFailed'
+        )]
+        [string]$Reason,
+
+        [object[]]$Results = @()
+    )
+
+    Assert-LabResultContract `
+        -Kind 'Stage 활성화 네트워크 연결 결과' `
+        -Status $Status `
+        -Succeeded $Succeeded `
+        -SuccessStatus 'Granted', 'Skipped'
+
+    [pscustomobject]@{
+        PSTypeName   = 'Lab.StageActivationGrantResult'
+        Stage        = $Stage
+        Status       = $Status
+        Succeeded    = $Succeeded
+        Reason       = $Reason
+
+        GrantedCount = Get-LabStatusCount `
+            -Result $Results `
+            -Status 'Granted'
+
+        SkippedCount = Get-LabStatusCount `
+            -Result $Results `
+            -Status 'Skipped'
+
+        FailedCount  = Get-LabStatusCount `
+            -Result $Results `
+            -Status 'Failed'
+
+        Results = @($Results)
+    }
+}
+
+function New-LabVmActivationRevokeResult {
+    [CmdletBinding()]
+    [Diagnostics.CodeAnalysis.SuppressMessage(
+        'PSUseShouldProcessForStateChangingFunctions',
+        '',
+        Justification = '메모리 내 결과 객체만 생성하며 외부 상태를 변경하지 않는다.'
+    )]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Name,
+
+        [Parameter(Mandatory)]
+        [ValidateSet(
+            'Revoked',
+            'Skipped',
+            'Failed'
+        )]
+        [string]$Status,
+
+        [Parameter(Mandatory)]
+        [bool]$Succeeded,
+
+        [ValidateSet(
+            'AlreadyAbsent',
+            'VmNotFound',
+            'AmbiguousVmName',
+            'ShouldProcessDeclined',
+            'Revoked',
+            'RevokeException'
+        )]
+        [string]$Reason,
+
+        [object[]]$Issues = @(),
+
+        [string]$ErrorMessage
+    )
+
+    Assert-LabResultContract `
+        -Kind 'VM 활성화 네트워크 해제 결과' `
+        -Status $Status `
+        -Succeeded $Succeeded `
+        -SuccessStatus 'Revoked', 'Skipped'
+
+    [pscustomobject]@{
+        PSTypeName = 'Lab.VmActivationRevokeResult'
+        Name       = $Name
+        Status     = $Status
+        Succeeded  = $Succeeded
+        Reason     = $Reason
+        Issues     = @($Issues)
+        Error      = $ErrorMessage
+    }
+}
+
+function New-LabStageActivationRevokeResult {
+    [CmdletBinding()]
+    [Diagnostics.CodeAnalysis.SuppressMessage(
+        'PSUseShouldProcessForStateChangingFunctions',
+        '',
+        Justification = '메모리 내 결과 객체만 생성하며 외부 상태를 변경하지 않는다.'
+    )]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Stage,
+
+        [Parameter(Mandatory)]
+        [ValidateSet(
+            'Revoked',
+            'Skipped',
+            'Failed'
+        )]
+        [string]$Status,
+
+        [Parameter(Mandatory)]
+        [bool]$Succeeded,
+
+        [ValidateSet(
+            'NoVmDefinitions',
+            'ShouldProcessDeclined',
+            'AlreadyAbsent',
+            'Completed',
+            'RevokeFailed'
+        )]
+        [string]$Reason,
+
+        [object[]]$Results = @()
+    )
+
+    Assert-LabResultContract `
+        -Kind 'Stage 활성화 네트워크 해제 결과' `
+        -Status $Status `
+        -Succeeded $Succeeded `
+        -SuccessStatus 'Revoked', 'Skipped'
+
+    [pscustomobject]@{
+        PSTypeName   = 'Lab.StageActivationRevokeResult'
+        Stage        = $Stage
+        Status       = $Status
+        Succeeded    = $Succeeded
+        Reason       = $Reason
+
+        RevokedCount = Get-LabStatusCount `
+            -Result $Results `
+            -Status 'Revoked'
+
+        SkippedCount = Get-LabStatusCount `
+            -Result $Results `
+            -Status 'Skipped'
+
+        FailedCount  = Get-LabStatusCount `
+            -Result $Results `
+            -Status 'Failed'
+
+        Results = @($Results)
+    }
+}
+
+function New-LabVmActivationCompletionResult {
+    [CmdletBinding()]
+    [Diagnostics.CodeAnalysis.SuppressMessage(
+        'PSUseShouldProcessForStateChangingFunctions',
+        '',
+        Justification = '메모리 내 결과 객체만 생성하며 외부 상태를 변경하지 않는다.'
+    )]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Stage,
+
+        [Parameter(Mandatory)]
+        [ValidateSet(
+            'Completed',
+            'TimedOut',
+            'Skipped',
+            'Failed'
+        )]
+        [string]$Status,
+
+        [Parameter(Mandatory)]
+        [bool]$Succeeded,
+
+        [ValidateSet(
+            'ShouldProcessDeclined',
+            'NoVmDefinitions',
+            'Completed',
+            'ActivationWaitTimedOut',
+            'GrantFailed',
+            'RevokeFailed'
+        )]
+        [string]$Reason,
+
+        [psobject]$GrantResult,
+
+        [psobject]$RevokeResult,
+
+        [string[]]$TimedOutNames = @()
+    )
+
+    Assert-LabResultContract `
+        -Kind 'VM 활성화 완료 결과' `
+        -Status $Status `
+        -Succeeded $Succeeded `
+        -SuccessStatus 'Completed', 'TimedOut', 'Skipped'
+
+    [pscustomobject]@{
+        PSTypeName    = 'Lab.VmActivationCompletionResult'
+        Stage         = $Stage
+        Status        = $Status
+        Succeeded     = $Succeeded
+        Reason        = $Reason
+        GrantResult   = $GrantResult
+        RevokeResult  = $RevokeResult
+        TimedOutNames = @($TimedOutNames)
+    }
+}
+
 function New-LabVmStartResult {
     [CmdletBinding()]
     [Diagnostics.CodeAnalysis.SuppressMessage(
@@ -433,7 +732,12 @@ function New-LabStageStartResult {
         # 이 필드는 "왜 이 VM들이 대상에 포함됐는지"를 바로 보여준다.
         [object[]]$DependencyNames = @(),
 
-        [psobject]$MemoryBudget
+        [psobject]$MemoryBudget,
+
+        # 이번 호출로 새로 시작된 VM 중 평가판 활성화가 필요했던
+        # VM에 대해 Complete-LabVmActivation을 자동 실행한 결과.
+        # 대상이 없었거나 -SkipActivation이었으면 $null이다.
+        [psobject]$ActivationResult
     )
 
     Assert-LabResultContract `
@@ -469,6 +773,7 @@ function New-LabStageStartResult {
         RequiredSwitches = @($RequiredSwitches)
         DependencyNames  = @($DependencyNames)
         MemoryBudget     = $MemoryBudget
+        ActivationResult = $ActivationResult
     }
 }
 
