@@ -4,7 +4,6 @@
 # 최상위 오케스트레이션 함수들. LabVM.psm1이 dot-source하며
 # 모듈 스코프를 공유한다.
 
-
 function New-LabVM {
     [CmdletBinding(
         SupportsShouldProcess,
@@ -42,7 +41,11 @@ function New-LabVM {
 
         [int]$ActivationTimeoutSeconds = 300,
 
-        [int]$ActivationGraceSeconds = 60
+        [int]$ActivationGraceSeconds = 60,
+
+        [int]$SeedTimeoutSeconds = 300,
+
+        [int]$SeedGraceSeconds = 0
     )
 
     $cfg = if ($Config) {
@@ -164,11 +167,6 @@ function New-LabVM {
                     }
             )
 
-            # Repair-LabVmDrift가 예외 없이 끝났다는 것은 각 교정 명령이
-            # 실행됐다는 뜻일 뿐, 실제 VM이 준수 상태가 됐다는 보장은
-            # 아니다(값이 반영되지 않았거나, 교정 중 다른 프로세스가
-            # 설정을 또 바꿨을 수 있다). 반드시 실제 상태를 다시 조회해
-            # 재검사한다.
             try {
                 $postCheck = Test-LabPrerequisite `
                     -Spec $Spec `
@@ -274,14 +272,27 @@ function New-LabVM {
     $memory = [int64]$Spec['MemoryMB'] * 1MB
     $switches = @($Spec['Switch'])
 
+    $isLinuxGuest = Test-LabTemplateIsLinux `
+        -Template $check.Template
+
+    $seedVhd = if ($isLinuxGuest) {
+        (
+            Get-LabVmPath `
+                -Name $Spec.Name `
+                -Config $cfg
+        ).SeedVhdPath
+    }
+    else {
+        $null
+    }
+
     $state = @{
         CreatedVhdDirectory = $false
         CreatedVmPath       = $false
         CreatedChildVhd     = $false
+        CreatedSeedVhd      = $false
         CreatedVm           = $false
         CreatedVmId         = $null
-        # $VmPath 소유권 marker에 적어 두는 값. 롤백이 이 값을 기록한
-        # 마커와 대조해, 이 작업이 만든 디렉터리가 맞는지 확인한다.
         OperationId         = [guid]::NewGuid().ToString('N')
     }
 
@@ -302,15 +313,17 @@ function New-LabVM {
             -StagedChildVhdPath $stagedChildVhd `
             -State $state
 
-        Set-LabUnattend `
-            -VhdPath $child `
-            -ComputerName $Spec.Name `
-            -AdminPassword $AdminPassword `
-            -TemplatePath $check.Template.UnattendPath `
-            -AccountMode $check.Template.AccountMode `
-            -LocalAdminName $cfg.LocalAdminName `
-            -TimeZone $cfg.TimeZone `
-            -Location PantherUnattend
+        if (-not $isLinuxGuest) {
+            Set-LabUnattend `
+                -VhdPath $child `
+                -ComputerName $Spec.Name `
+                -AdminPassword $AdminPassword `
+                -TemplatePath $check.Template.UnattendPath `
+                -AccountMode $check.Template.AccountMode `
+                -LocalAdminName $cfg.LocalAdminName `
+                -TimeZone $cfg.TimeZone `
+                -Location PantherUnattend
+        }
 
         Set-LabVmHardwareProfile `
             -Spec $Spec `
@@ -319,6 +332,17 @@ function New-LabVM {
             -ChildVhdPath $child `
             -VmPath $vmPath `
             -State $state
+
+        if ($isLinuxGuest) {
+            Add-LabVmCloudInitSeedDisk `
+                -Name $Spec.Name `
+                -SeedVhdPath $seedVhd `
+                -UserName (
+                    ([string]$cfg.LocalAdminName).ToLowerInvariant()
+                ) `
+                -AdminPassword $AdminPassword `
+                -State $state
+        }
 
         Set-LabVmNetworkAdapter `
             -Spec $Spec `
@@ -346,8 +370,6 @@ function New-LabVM {
             )
         }
 
-        # 생성이 성공했으므로 롤백용 소유권 marker는 더 이상 필요 없다.
-        # 지워두지 않으면 Export-VM 결과물 등에 섞여 나간다.
         Remove-Item `
             -LiteralPath (
                 Join-Path $vmPath '.labvm-creation-owner'
@@ -355,7 +377,7 @@ function New-LabVM {
             -Force `
             -ErrorAction SilentlyContinue
 
-        $activationWarnings = @()
+        $firstBootWarnings = @()
 
         if ($CompleteActivation) {
             try {
@@ -370,11 +392,17 @@ function New-LabVM {
                     -TimeoutSeconds $ActivationTimeoutSeconds `
                     -GraceSeconds $ActivationGraceSeconds
 
+                $seedResult = Complete-LabVmCloudInitSeedIfNeeded `
+                    -Name @($Spec.Name) `
+                    -Config $cfg `
+                    -TimeoutSeconds $SeedTimeoutSeconds `
+                    -GraceSeconds $SeedGraceSeconds
+
                 if (
                     $activationResult -and
                     $activationResult.TimedOutNames.Count -gt 0
                 ) {
-                    $activationWarnings += (
+                    $firstBootWarnings += (
                         "VM '$($Spec.Name)'이 평가판 활성화 임시 " +
                         '네트워크에서 제한 시간 안에 IP를 받지 ' +
                         "못했습니다. VM 디렉터리의 " +
@@ -383,9 +411,45 @@ function New-LabVM {
                         '있습니다.'
                     )
                 }
-                elseif (
-                    $activationResult -and
-                    $activationResult.Status -eq 'Completed'
+
+                if (
+                    $seedResult -and
+                    $seedResult.TimedOutNames.Count -gt 0
+                ) {
+                    $firstBootWarnings += (
+                        "VM '$($Spec.Name)'이 제한 시간 안에 " +
+                        'cloud-init 적용을 알리지 않아 시드 디스크가 ' +
+                        '그대로 남아 있습니다. 게스트 상태를 확인한 ' +
+                        '뒤 Remove-LabVmCloudInitSeed로 다시 회수할 ' +
+                        '수 있습니다.'
+                    )
+                }
+
+                $firstBootPending = (
+                    (
+                        $activationResult -and
+                        $activationResult.TimedOutNames.Count -gt 0
+                    ) -or
+                    (
+                        $seedResult -and
+                        $seedResult.TimedOutNames.Count -gt 0
+                    )
+                )
+
+                $firstBootCompleted = (
+                    (
+                        $activationResult -and
+                        $activationResult.Status -eq 'Completed'
+                    ) -or
+                    (
+                        $seedResult -and
+                        $seedResult.Status -eq 'Removed'
+                    )
+                )
+
+                if (
+                    -not $firstBootPending -and
+                    $firstBootCompleted
                 ) {
                     try {
                         Stop-VM `
@@ -393,16 +457,16 @@ function New-LabVM {
                             -ErrorAction Stop
                     }
                     catch {
-                        $activationWarnings += (
-                            "VM '$($Spec.Name)' 활성화 완료 후 종료 " +
-                            "실패: $($_.Exception.Message)"
+                        $firstBootWarnings += (
+                            "VM '$($Spec.Name)' 첫 부팅 작업 완료 후 " +
+                            "종료 실패: $($_.Exception.Message)"
                         )
                     }
                 }
             }
             catch {
-                $activationWarnings += (
-                    "VM '$($Spec.Name)' 평가판 활성화 자동 실행 " +
+                $firstBootWarnings += (
+                    "VM '$($Spec.Name)' 첫 부팅 자동 처리 " +
                     "실패: $($_.Exception.Message)"
                 )
             }
@@ -417,7 +481,7 @@ function New-LabVM {
                 -Warnings (
                     @($warnings) +
                     @($postCheck.Warnings) +
-                    $activationWarnings
+                    $firstBootWarnings
                 ) `
                 -CPU ([int]$Spec.CPU) `
                 -MemoryMB ([int64]$Spec.MemoryMB) `
@@ -433,7 +497,8 @@ function New-LabVM {
             -ChildVhdPath $child `
             -StagedChildVhdPath $stagedChildVhd `
             -VmPath $vmPath `
-            -VhdDirectory $vhdDirectory
+            -VhdDirectory $vhdDirectory `
+            -SeedVhdPath $seedVhd
 
         $errorMessage = (
             "VM '$($Spec.Name)' 생성 실패: " +
@@ -478,14 +543,8 @@ function Remove-LabVM {
         [Parameter(Mandatory)]
         [string]$Name,
 
-        # 실행 중 VM의 강제 전원 차단과
-        # 구성 편차가 있는 VM 등록 제거를 허용한다.
         [switch]$Force,
 
-        # Remove-LabVM을 내부에서 반복 호출하는 New-LabStage 롤백,
-        # Reset-LabStage 같은 호출자가 이미 Get-LabConfig를 부른 경우
-        # 넘겨서 재조회(및 재귀 딥카피)를 피한다. 생략하면 이 함수가
-        # 직접 조회한다.
         [System.Collections.IDictionary]$Config
     )
 
@@ -505,11 +564,16 @@ function Remove-LabVM {
     $expectedVhdPath = $labPaths.VhdPath
     $expectedVmPath = $labPaths.VmPath
 
+    $expectedSeedVhdPath = $labPaths.SeedVhdPath
+
     $expectedVhdNormalized = ConvertTo-LabNormalizedPath `
         -Path $expectedVhdPath
 
     $expectedVmNormalized = ConvertTo-LabNormalizedPath `
         -Path $expectedVmPath
+
+    $expectedSeedVhdNormalized = ConvertTo-LabNormalizedPath `
+        -Path $expectedSeedVhdPath
 
     try {
         $vm = Get-LabVmByName `
@@ -541,10 +605,14 @@ function Remove-LabVM {
     $vmPathExists =
         Test-Path -LiteralPath $expectedVmPath
 
+    $seedVhdExists =
+        Test-Path -LiteralPath $expectedSeedVhdPath
+
     if (
         -not $vm -and
         -not $vhdExists -and
-        -not $vmPathExists
+        -not $vmPathExists -and
+        -not $seedVhdExists
     ) {
         return (
             New-LabVmRemovalResult `
@@ -563,7 +631,10 @@ function Remove-LabVM {
         -Vm $vm `
         -Force:$Force `
         -ExpectedVhdNormalized $expectedVhdNormalized `
-        -ExpectedVmNormalized $expectedVmNormalized
+        -ExpectedVmNormalized $expectedVmNormalized `
+        -AdditionalExpectedVhdNormalized @(
+            $expectedSeedVhdNormalized
+        )
 
     if ($conflictCheck.BlockingResult) {
         return $conflictCheck.BlockingResult
@@ -616,6 +687,8 @@ function Remove-LabVM {
             -ExpectedVhdPath $expectedVhdPath `
             -ExpectedVmPath $expectedVmPath `
             -ExpectedVhdNormalized $expectedVhdNormalized `
+            -SeedVhdPath $expectedSeedVhdPath `
+            -SeedVhdNormalized $expectedSeedVhdNormalized `
             -ActualDiskPaths $actualDiskPaths `
             -RemovedPaths $removedPaths `
             -PreservedPaths $preservedPaths
@@ -655,16 +728,17 @@ function New-LabStage {
 
         [securestring]$AdminPassword,
 
-        # Conflict인 기존 VM 중 드리프트가 전부 Fixable인 것들을
-        # New-LabVM -Reconcile로 교정한다. 자세한 내용은
-        # New-LabVM -Reconcile 설명을 참고한다.
         [switch]$Reconcile,
 
         [switch]$CompleteActivation,
 
         [int]$ActivationTimeoutSeconds = 300,
 
-        [int]$ActivationGraceSeconds = 60
+        [int]$ActivationGraceSeconds = 60,
+
+        [int]$SeedTimeoutSeconds = 300,
+
+        [int]$SeedGraceSeconds = 0
     )
 
     $cfg = Get-LabConfig
@@ -673,9 +747,6 @@ function New-LabStage {
         -Stage $Stage `
         -Config $cfg
 
-    # VM Stage 여부와 무관하게, 이 Stage를 돌리는 데 필요한 가상
-    # 스위치 목록을 먼저 계산해 모든 New-LabStageResult 반환 지점에
-    # 실어 보낸다(Lab.StageCreationResult 계약의 RequiredSwitches).
     $requiredSwitches = @(
         Get-LabStageRequiredSwitch `
             -Stage $Stage `
@@ -687,7 +758,6 @@ function New-LabStage {
         Resolve-LabSpec -Stage $Stage -Config $cfg
     )
 
-    # VM이 없는 base 같은 인프라 Stage 처리
     if ($specs.Count -eq 0) {
         if ($requiredSwitches.Count -gt 0) {
             return (
@@ -750,9 +820,6 @@ function New-LabStage {
                     )
                 }
 
-                # Conflict인 기존 VM의 드리프트가 전부 Fixable이면
-                # -Reconcile 아래에서는 이 계획을 차단하지 않고
-                # 2단계의 New-LabVM -Reconcile로 넘긴다.
                 $reconcileEligible = (
                     $Reconcile -and
                     $check.Disposition -eq 'Conflict' -and
@@ -793,10 +860,6 @@ function New-LabStage {
         }
     )
 
-    # Stage에서 실제로 생성할 Create 계획들의 디스크 요구량을 합산해
-    # 전체 생성 가능 여부를 검사한다. 부족하면 해당 계획들을 Failed로
-    # 바꾼다($plans 원소는 참조 타입이라 아래 $blockingPlans 재계산에
-    # 곧바로 반영된다).
     Update-LabStagePlanDiskBudget `
         -Stage $Stage `
         -Config $cfg `
@@ -980,7 +1043,9 @@ function New-LabStage {
                     -Config $cfg `
                     -CompleteActivation:$CompleteActivation `
                     -ActivationTimeoutSeconds $ActivationTimeoutSeconds `
-                    -ActivationGraceSeconds $ActivationGraceSeconds
+                    -ActivationGraceSeconds $ActivationGraceSeconds `
+                    -SeedTimeoutSeconds $SeedTimeoutSeconds `
+                    -SeedGraceSeconds $SeedGraceSeconds
             )
 
             if ($vmOutput.Count -ne 1) {
@@ -1042,8 +1107,6 @@ function New-LabStage {
         }
     }
 
-    # 실행은 안전을 위해 Create 우선 순서로 했지만, 보고는 Stage에
-    # 정의된 원래 순서를 유지한다.
     $resultArray = @(
         $plans |
             ForEach-Object {
@@ -1212,13 +1275,21 @@ function Start-LabStage {
 
         [switch]$SkipActivation,
 
+        [switch]$SkipSeedCleanup,
+
         [securestring]$AdminPassword,
 
         [ValidateRange(0, 3600)]
         [int]$ActivationTimeoutSeconds = 300,
 
         [ValidateRange(0, 600)]
-        [int]$ActivationGraceSeconds = 60
+        [int]$ActivationGraceSeconds = 60,
+
+        [ValidateRange(0, 3600)]
+        [int]$SeedTimeoutSeconds = 300,
+
+        [ValidateRange(0, 600)]
+        [int]$SeedGraceSeconds = 0
     )
 
     $cfg = Get-LabConfig
@@ -1305,10 +1376,6 @@ function Start-LabStage {
             -Config $cfg
     )
 
-    # 의존 VM(예: RRAS01)이 Stage 자체 VM보다 먼저 시작되도록 맨
-    # 앞에 둔다. Select-Object -Unique는 첫 등장 순서를 유지하므로
-    # 이후 stageNames/Also에 같은 이름이 다시 나와도 순서가 안
-    # 흐트러진다.
     $targetNames = @(
         $dependencyNames +
         $stageNames +
@@ -1486,7 +1553,6 @@ function Start-LabStage {
                 -VM $vm `
                 -ErrorAction Stop
 
-            # $vm은 Start-VM 시점부터 stale이므로 다시 조회한다.
             $current = Get-VM `
                 -Name $vm.Name `
                 -ErrorAction SilentlyContinue
@@ -1565,28 +1631,42 @@ function Start-LabStage {
 
     $resultArray = @($results)
 
+    $freshlyStartedNames = @(
+        $resultArray |
+            Where-Object {
+                $_.Status -eq 'Started' -and
+                $_.Reason -eq 'Started'
+            } |
+            ForEach-Object {
+                [string]$_.Name
+            }
+    )
+
     $activationResult = $null
 
-    if (-not $SkipActivation) {
-        $freshlyStartedNames = @(
-            $resultArray |
-                Where-Object {
-                    $_.Status -eq 'Started' -and
-                    $_.Reason -eq 'Started'
-                } |
-                ForEach-Object {
-                    [string]$_.Name
-                }
-        )
+    if (
+        -not $SkipActivation -and
+        $freshlyStartedNames.Count -gt 0
+    ) {
+        $activationResult = Complete-LabVmActivationIfNeeded `
+            -Name $freshlyStartedNames `
+            -Config $cfg `
+            -AdminPassword $AdminPassword `
+            -TimeoutSeconds $ActivationTimeoutSeconds `
+            -GraceSeconds $ActivationGraceSeconds
+    }
 
-        if ($freshlyStartedNames.Count -gt 0) {
-            $activationResult = Complete-LabVmActivationIfNeeded `
-                -Name $freshlyStartedNames `
-                -Config $cfg `
-                -AdminPassword $AdminPassword `
-                -TimeoutSeconds $ActivationTimeoutSeconds `
-                -GraceSeconds $ActivationGraceSeconds
-        }
+    $cloudInitSeedResult = $null
+
+    if (
+        -not $SkipSeedCleanup -and
+        $freshlyStartedNames.Count -gt 0
+    ) {
+        $cloudInitSeedResult = Complete-LabVmCloudInitSeedIfNeeded `
+            -Name $freshlyStartedNames `
+            -Config $cfg `
+            -TimeoutSeconds $SeedTimeoutSeconds `
+            -GraceSeconds $SeedGraceSeconds
     }
 
     $stageStatus = Resolve-LabAggregateStatus `
@@ -1600,8 +1680,6 @@ function Start-LabStage {
         }
 
         'Skipped' {
-            # 전부 -WhatIf/거부로 건너뛴 경우와
-            # 이미 실행 중이라 건너뛴 경우를 구분한다.
             $declined = Get-LabStatusCount `
                 -Result $resultArray `
                 -Status 'ShouldProcessDeclined' `
@@ -1644,24 +1722,12 @@ function Start-LabStage {
             -RequiredSwitches $requiredSwitches `
             -DependencyNames $dependencyNames `
             -MemoryBudget $memoryBudget `
-            -ActivationResult $activationResult
+            -ActivationResult $activationResult `
+            -CloudInitSeedResult $cloudInitSeedResult
     )
 }
 
 function Test-LabVmStillNeeded {
-    # $Name을 끄기 전에, $ExcludingStage 이외의 다른 Stage가 지금
-    # StageDependencies로 이 VM을 요구하고 있으면서, 그 Stage가
-    # 실제로 활성 상태(그 Stage 소유 VM 중 하나라도 Running)인지
-    # 확인한다. 해당하면 그 Stage 이름을 돌려주고, 없으면 $null을
-    # 돌려준다.
-    #
-    # $Name의 소유 Stage 자체는 검사 대상에서 자연히 제외된다 -
-    # StageDependencies는 자기 자신 소유 VM을 의존성으로 선언할 수
-    # 없으므로(Assert-LabConfig가 막는다), $Name의 소유 Stage가
-    # 이 검사에 걸릴 일은 없다. 만약 ownNames(그 Stage의 소유 VM)에
-    # $Name이 포함됐는지를 따로 검사하면, "지금 끄려는 VM 자신이
-    # Running이니 자기 Stage가 활성 상태"라는 동어반복에 빠져 절대
-    # 끌 수 없게 되므로 그런 검사는 하지 않는다.
     [CmdletBinding()]
     [OutputType([string])]
     param(
@@ -1728,7 +1794,6 @@ function Stop-LabStage {
 
         [string[]]$Also,
 
-        # 통합 서비스를 통한 정상 종료 대신 즉시 전원을 끈다.
         [switch]$TurnOff,
 
         [switch]$Force
@@ -1757,20 +1822,9 @@ function Stop-LabStage {
         )
     }
 
-    # Start-LabStage는 Stage 정의 순서대로 VM을 시작한다(예: AD DS
-    # Stage에서 DC가 멤버 서버보다 먼저 정의되어 먼저 시작된다).
-    # 종료는 그 반대 순서로 진행해, DC처럼 다른 VM이 의존하는 VM을
-    # 가장 나중에 끈다. Reset-LabStage의 제거 순서와 같은 원칙이다.
-    # -Also로 추가된 VM은 Stage 소속이 아니라 부가적으로 함께 끄는
-    # 대상이므로, 반전 이후 목록 맨 뒤에 붙여 Stage 자체 VM보다도
-    # 나중에(가장 마지막에) 꺼지게 한다.
     $reversedStageNames = @($stageNames)
     [array]::Reverse($reversedStageNames)
 
-    # StageDependencies로 이 Stage와 함께 자동으로 켜졌을 VM들.
-    # Stage 자체 VM을 다 끈 다음, 가까운 의존부터(Get-LabStageDependencyClosure의
-    # 발견 순서 그대로) 이어서 끈다. 다른 활성 Stage가 아직 쓰고
-    # 있으면 Test-LabVmStillNeeded가 걸러낸다.
     $dependencyNames = @(
         Get-LabStageDependencyClosure `
             -Stage $Stage `
@@ -1909,7 +1963,6 @@ function Stop-LabStage {
                 -Force:$Force `
                 -ErrorAction Stop
 
-            # $vm은 Stop-VM 시점부터 stale이므로 다시 조회한다.
             $current = Get-VM `
                 -Name $vm.Name `
                 -ErrorAction SilentlyContinue
@@ -1968,8 +2021,6 @@ function Stop-LabStage {
         }
 
         'Skipped' {
-            # 전부 -WhatIf/거부로 건너뛴 경우, 다른 Stage가 아직
-            # 써서 건너뛴 경우, 이미 꺼져 있어 건너뛴 경우를 구분한다.
             $declined = Get-LabStatusCount `
                 -Result $resultArray `
                 -Status 'ShouldProcessDeclined' `
@@ -2561,7 +2612,6 @@ function Complete-LabVmActivation {
 
         [securestring]$AdminPassword,
 
-        # 활성화를 확인할 때까지 기다리는 최대 시간.
         [ValidateRange(0, 3600)]
         [int]$TimeoutSeconds = 300,
 
@@ -2643,10 +2693,6 @@ function Complete-LabVmActivation {
 
     if ($pendingNames.Count -gt 0) {
         if ($AdminPassword) {
-            # PowerShell Direct로 게스트에 직접 들어가 실제 라이선스
-            # 상태를 확인하고, 필요하면 slmgr.vbs /ato로 트리거한다.
-            # VM마다 계정 모드(BuiltInAdministrator vs LocalAccount)가
-            # 다를 수 있으므로 자격 증명은 VM별로 계산해 캐시한다.
             $credentialCache = @{}
 
             $activationCheckScript = {
@@ -2716,9 +2762,6 @@ function Complete-LabVmActivation {
                             )
                         }
                         catch {
-                            # 자격 증명을 계산할 수 없으면(예: 정의되지
-                            # 않은 템플릿) 이번 폴링에서는 건너뛰고
-                            # 다음 폴링에서 다시 시도한다.
                             continue
                         }
                     }
@@ -2731,10 +2774,6 @@ function Complete-LabVmActivation {
                             -ErrorAction Stop
                     }
                     catch {
-                        # 아직 부팅 중이거나 통합 서비스가 준비되지
-                        # 않아 PowerShell Direct 연결이 실패하는 것은
-                        # 일시적일 수 있으므로 다음 폴링에서 다시
-                        # 시도한다.
                         $licensed = $false
                     }
 
@@ -2761,8 +2800,6 @@ function Complete-LabVmActivation {
                         -Name $script:LabActivationAdapterName `
                         -ErrorAction SilentlyContinue
 
-                    # 링크 로컬(169.254.x.x, fe80::)은 DHCP를 받지 못한
-                    # 상태이므로 "아직 나갈 수 없다"로 취급한다.
                     $hasUsableAddress = @(
                         $adapter.IPAddresses |
                             Where-Object {
@@ -2873,8 +2910,6 @@ function Complete-LabVmActivationIfNeeded {
             -Config $Config
     }
     catch {
-        # External 스위치가 정의되지 않은 환경(순수 격리 랩, 테스트
-        # 등)에서는 활성화 자동화를 조용히 건너뛴다.
         return $null
     }
 
@@ -2885,6 +2920,27 @@ function Complete-LabVmActivationIfNeeded {
                 -Config $Config
 
             if (@($spec['Switch']) -contains $externalSwitchName) {
+                continue
+            }
+
+            $vmTemplate = $null
+
+            try {
+                $vmTemplate = Resolve-LabTemplate `
+                    -Name ([string]$spec['Template']) `
+                    -Config $Config
+            }
+            catch {
+                $vmTemplate = $null
+            }
+
+            if (
+                $vmTemplate -and
+                (
+                    Test-LabTemplateIsLinux `
+                        -Template $vmTemplate
+                )
+            ) {
                 continue
             }
 
@@ -2943,6 +2999,429 @@ function Complete-LabVmActivationIfNeeded {
     }
 
     $activationResult
+}
+
+function Test-LabVmCloudInitApplied {
+    <#
+    .SYNOPSIS
+        게스트가 시드 적용을 마쳤다고 알렸는지 확인한다.
+    .DESCRIPTION
+        시드 user-data의 마지막 runcmd가 게스트 쪽 KVP 풀에 VM 이름을
+        쓴다. runcmd는 cloud-init의 마지막 단계라, 이 값이 보이면 호스트
+        이름과 계정 암호 주입이 모두 끝난 뒤다.
+
+        호스트 이름 KVP를 쓰지 않는 이유는 Get-LabVmGuestKvpValue 설명을
+        참고한다.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Name
+    )
+
+    $appliedValue = Get-LabVmGuestKvpValue `
+        -Name $Name `
+        -Key $script:LabCloudInitAppliedKvpKey
+
+    if ([string]::IsNullOrWhiteSpace($appliedValue)) {
+        return $false
+    }
+
+    return ($appliedValue -ieq $Name)
+}
+
+function Remove-LabVmCloudInitSeed {
+    <#
+    .SYNOPSIS
+        첫 부팅이 끝난 VM에서 cloud-init 시드 디스크를 회수한다.
+    .DESCRIPTION
+        시드 user-data에는 실습 계정 암호가 평문으로 들어 있고, 쓰이는
+        시점은 첫 부팅 한 번뿐이다. 그래서 cloud-init이 값을 적용한 것을
+        확인하는 즉시 디스크를 분리하고 VHDX 파일을 지운다.
+
+        Start-LabStage와 New-LabVM -CompleteActivation이 첫 부팅 직후
+        이 작업을 자동으로 부르므로 보통은 직접 부를 일이 없다. 게스트가
+        제한 시간 안에 응답하지 않아 시드가 남았을 때 다시 시도하는
+        용도로 공개해 둔다.
+
+        적용 여부는 게스트가 cloud-init 마지막 단계에서 KVP로 올리는
+        완료 표시로 판정한다. 이 표시는 호스트 이름과 계정 암호 주입이
+        모두 끝난 뒤에 올라오므로 따로 기다릴 필요가 없다. 게스트가
+        느린 환경을 위해 -GraceSeconds를 남겨 두었지만 기본값은 0이다.
+
+        -Force는 이 확인을 건너뛰고 곧바로 회수한다. 첫 부팅이 확실히
+        끝난 VM에만 쓴다. 완료 표시를 넣기 전(구 버전 시드)에 만든 VM도
+        이 방법으로 회수한다.
+    #>
+    [CmdletBinding(
+        SupportsShouldProcess,
+        DefaultParameterSetName = 'ByStage'
+    )]
+    param(
+        [Parameter(Mandatory, ParameterSetName = 'ByStage')]
+        [string]$Stage,
+
+        [Parameter(ParameterSetName = 'ByStage')]
+        [string[]]$Also,
+
+        [Parameter(Mandatory, ParameterSetName = 'ByName')]
+        [ValidateNotNullOrEmpty()]
+        [string[]]$Name,
+
+        # cloud-init 적용 확인을 건너뛰고 곧바로 회수한다.
+        [switch]$Force,
+
+        [ValidateRange(0, 3600)]
+        [int]$TimeoutSeconds = 300,
+
+        [ValidateRange(0, 600)]
+        [int]$GraceSeconds = 0,
+
+        [ValidateRange(1, 60)]
+        [int]$PollIntervalSeconds = 5,
+
+        [System.Collections.IDictionary]$Config
+    )
+
+    $cfg = if ($Config) {
+        $Config
+    }
+    else {
+        Get-LabConfig
+    }
+
+    $stageLabel = if ($PSCmdlet.ParameterSetName -eq 'ByName') {
+        ''
+    }
+    else {
+        $Stage
+    }
+
+    $targetNames = if ($PSCmdlet.ParameterSetName -eq 'ByName') {
+        @($Name)
+    }
+    else {
+        Assert-LabStageName `
+            -Stage $Stage `
+            -Config $cfg
+
+        @(
+            @(
+                Resolve-LabSpec -Stage $Stage -Config $cfg |
+                    ForEach-Object {
+                        [string]$_['Name']
+                    }
+            ) +
+            @($Also | Select-LabNonEmptyString) |
+                Select-Object -Unique
+        )
+    }
+
+    $results =
+        [Collections.Generic.List[object]]::new()
+
+    $seedPaths = @{}
+
+    $waitingNames =
+        [Collections.Generic.List[string]]::new()
+
+    $readyNames =
+        [Collections.Generic.List[string]]::new()
+
+    foreach ($targetName in $targetNames) {
+        $seedPath = (
+            Get-LabVmPath `
+                -Name $targetName `
+                -Config $cfg
+        ).SeedVhdPath
+
+        if (-not (Test-Path -LiteralPath $seedPath)) {
+            $results.Add(
+                (
+                    New-LabVmCloudInitSeedResult `
+                        -Name $targetName `
+                        -Status Skipped `
+                        -Succeeded $true `
+                        -Reason 'SeedNotFound' `
+                        -SeedVhdPath $seedPath
+                )
+            )
+
+            continue
+        }
+
+        if (
+            -not $PSCmdlet.ShouldProcess(
+                $targetName,
+                'cloud-init 시드 디스크 분리 후 삭제'
+            )
+        ) {
+            $results.Add(
+                (
+                    New-LabVmCloudInitSeedResult `
+                        -Name $targetName `
+                        -Status Skipped `
+                        -Succeeded $true `
+                        -Reason 'ShouldProcessDeclined' `
+                        -SeedVhdPath $seedPath
+                )
+            )
+
+            continue
+        }
+
+        $seedPaths[$targetName] = $seedPath
+
+        if ($Force) {
+            $readyNames.Add($targetName)
+
+            continue
+        }
+
+        $vm = Get-LabVmByName -Name $targetName
+
+        if (
+            -not $vm -or
+            [string]$vm.State -ne 'Running'
+        ) {
+            $results.Add(
+                (
+                    New-LabVmCloudInitSeedResult `
+                        -Name $targetName `
+                        -Status Skipped `
+                        -Succeeded $true `
+                        -Reason 'GuestNotRunning' `
+                        -SeedVhdPath $seedPath
+                )
+            )
+
+            continue
+        }
+
+        $waitingNames.Add($targetName)
+    }
+
+    if ($waitingNames.Count -gt 0) {
+        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+
+        while ($true) {
+            foreach ($waitingName in @($waitingNames)) {
+                if (
+                    Test-LabVmCloudInitApplied `
+                        -Name $waitingName
+                ) {
+                    $readyNames.Add($waitingName)
+
+                    $waitingNames.Remove($waitingName) |
+                        Out-Null
+                }
+            }
+
+            if (
+                $waitingNames.Count -eq 0 -or
+                (Get-Date) -ge $deadline
+            ) {
+                break
+            }
+
+            Start-Sleep -Seconds $PollIntervalSeconds
+        }
+
+        if (
+            $readyNames.Count -gt 0 -and
+            $GraceSeconds -gt 0
+        ) {
+            Start-Sleep -Seconds $GraceSeconds
+        }
+    }
+
+    foreach ($readyName in $readyNames) {
+        try {
+            Remove-LabVmCloudInitSeedDisk `
+                -Name $readyName `
+                -SeedVhdPath $seedPaths[$readyName]
+
+            $results.Add(
+                (
+                    New-LabVmCloudInitSeedResult `
+                        -Name $readyName `
+                        -Status Removed `
+                        -Succeeded $true `
+                        -Reason 'Removed' `
+                        -SeedVhdPath $seedPaths[$readyName]
+                )
+            )
+        }
+        catch {
+            $removeMessage = (
+                "VM '$readyName'의 cloud-init 시드 디스크 회수 " +
+                "실패: $($_.Exception.Message)"
+            )
+
+            Write-Warning $removeMessage
+
+            $results.Add(
+                (
+                    New-LabVmCloudInitSeedResult `
+                        -Name $readyName `
+                        -Status Failed `
+                        -Succeeded $false `
+                        -Reason 'RemoveFailed' `
+                        -SeedVhdPath $seedPaths[$readyName] `
+                        -Issues @($removeMessage) `
+                        -ErrorMessage $_.Exception.Message
+                )
+            )
+        }
+    }
+
+    foreach ($timedOutName in $waitingNames) {
+        $observedKeys = @(
+            Get-LabVmGuestKvpItem -Name $timedOutName |
+                ForEach-Object {
+                    '{0}={1}' -f $_.Name, $_.Data
+                }
+        )
+
+        $observedText = if ($observedKeys.Count -gt 0) {
+            $observedKeys -join ', '
+        }
+        else {
+            '(없음)'
+        }
+
+        $timeoutMessage = (
+            "VM '$timedOutName'이 제한 시간 안에 cloud-init 적용을 " +
+            '알리지 않아 시드 디스크를 남겨 두었습니다. 호스트가 읽은 ' +
+            "게스트 KVP 항목: $observedText. 게스트에서 " +
+            "'cloud-init status --long'과 " +
+            "'systemctl status hypervkvpd'를 확인하십시오. 적용이 " +
+            '끝난 것이 확실하면(완료 표시가 없는 구 버전 시드 포함) ' +
+            'Remove-LabVmCloudInitSeed -Force로 회수할 수 있습니다.'
+        )
+
+        Write-Warning $timeoutMessage
+
+        $results.Add(
+            (
+                New-LabVmCloudInitSeedResult `
+                    -Name $timedOutName `
+                    -Status TimedOut `
+                    -Succeeded $true `
+                    -Reason 'SeedWaitTimedOut' `
+                    -SeedVhdPath $seedPaths[$timedOutName] `
+                    -Issues @($timeoutMessage)
+            )
+        )
+    }
+
+    $resultArray = @($results)
+
+    $status = Resolve-LabAggregateStatus `
+        -Result $resultArray `
+        -Priority 'Failed', 'TimedOut', 'Removed' `
+        -DefaultStatus 'Skipped'
+
+    $reason = switch ($status) {
+        'Removed' {
+            'Completed'
+        }
+
+        'TimedOut' {
+            'SeedWaitTimedOut'
+        }
+
+        'Failed' {
+            'RemoveFailed'
+        }
+
+        'Skipped' {
+            $declined = Get-LabStatusCount `
+                -Result $resultArray `
+                -Status 'ShouldProcessDeclined' `
+                -Property 'Reason'
+
+            if (
+                $resultArray.Count -gt 0 -and
+                $declined -eq $resultArray.Count
+            ) {
+                'ShouldProcessDeclined'
+            }
+            else {
+                'NoSeedDisk'
+            }
+        }
+    }
+
+    return (
+        New-LabCloudInitSeedRemovalResult `
+            -Stage $stageLabel `
+            -Status $status `
+            -Succeeded (
+                @(
+                    $resultArray |
+                        Where-Object {
+                            -not $_.Succeeded
+                        }
+                ).Count -eq 0
+            ) `
+            -Reason $reason `
+            -Results $resultArray `
+            -TimedOutNames @($waitingNames)
+    )
+}
+
+function Complete-LabVmCloudInitSeedIfNeeded {
+    <#
+    .SYNOPSIS
+        방금 부팅한 VM 중 시드 디스크가 남아 있는 것만 회수한다.
+    .DESCRIPTION
+        Windows 평가판 활성화의 Complete-LabVmActivationIfNeeded와 같은
+        자리에서 돌며, 회수할 시드가 하나도 없으면 $null을 돌려준다.
+
+        회수가 끝나면 VHDX 파일이 사라지므로 활성화처럼 별도 마커
+        파일을 둘 필요가 없다. 파일이 남아 있다는 것이 곧 아직
+        회수하지 않았다는 뜻이다.
+    #>
+    [CmdletBinding()]
+    [OutputType([psobject])]
+    param(
+        [Parameter(Mandatory)]
+        [string[]]$Name,
+
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary]$Config,
+
+        [int]$TimeoutSeconds = 300,
+
+        [int]$GraceSeconds = 0
+    )
+
+    $pendingNames = @(
+        foreach ($vmName in $Name) {
+            $seedPath = (
+                Get-LabVmPath `
+                    -Name $vmName `
+                    -Config $Config
+            ).SeedVhdPath
+
+            if (Test-Path -LiteralPath $seedPath) {
+                $vmName
+            }
+        }
+    )
+
+    if ($pendingNames.Count -eq 0) {
+        return $null
+    }
+
+    Remove-LabVmCloudInitSeed `
+        -Name $pendingNames `
+        -Config $Config `
+        -TimeoutSeconds $TimeoutSeconds `
+        -GraceSeconds $GraceSeconds `
+        -Confirm:$false
 }
 
 function Get-LabStatus {

@@ -34,18 +34,16 @@
         'nested-core'
     )
 
-    # key로 지정한 Stage를 Start-LabStage로 시작할 때 자동으로 함께
-    # 켜야 하는 VM 이름. 직접 의존만 적으면 되고(전이 의존은
-    # Get-LabStageDependencyClosure가 재귀로 풀어낸다), StageOrder에는
-    # 있지만 여기 키가 없는 Stage는 의존성이 없는 것으로 취급한다.
     StageDependencies = @{
         addc        = @('RRAS01')
         'addc-core' = @('RRAS-C01')
+        'wsus-core' = @('RRAS-C01', 'PROXY01')
     }
 
     Templates = @{
         GUI = @{
             Vhd         = 'Templates\WS25-BASE-GUI.vhdx'
+            OSType      = 'Windows'
             Unattend    = 'unattend-oobe.template.xml'
             AccountMode = 'BuiltInAdministrator'
             SecureBoot  = $true
@@ -54,6 +52,7 @@
 
         CORE = @{
             Vhd         = 'Templates\WS25-BASE-CORE.vhdx'
+            OSType      = 'Windows'
             Unattend    = 'unattend-oobe.template.xml'
             AccountMode = 'BuiltInAdministrator'
             SecureBoot  = $true
@@ -62,16 +61,23 @@
 
         WIN11 = @{
             Vhd         = 'Templates\WIN11-BASE.vhdx'
+            OSType      = 'Windows'
             Unattend    = 'unattend-oobe.win11.template.xml'
             AccountMode = 'LocalAccount'
             SecureBoot  = $true
             EnableTpm   = $true
         }
+
+        RL10 = @{
+            Vhd        = 'Templates\RL10-BASE.vhdx'
+            OSType     = 'Linux'
+            SecureBoot = $true
+            EnableTpm  = $false
+        }
     }
 
-    # Stage 키는 실습 범위 목록의 주제어와 일치시킨다.
     Switches = @(
-        @{ Name = 'LAB-Internal'; Type = 'Internal'; Stage = 'base'   }
+        @{ Name = 'LAB-Internal'; Type = 'Private'; Stage = 'base'   }
         @{ Name = 'LAB-External'; Type = 'External'; Stage = 'rras'   }
         @{ Name = 'LAB-DMZ';      Type = 'Private'; Stage = 'rras'   }
         @{ Name = 'LAB-Egress';   Type = 'Private';  Stage = 'rras' }
@@ -244,6 +250,15 @@
             CPU      = 4
             MemoryMB = 8192
             Switch   = @('LAB-Internal')
+        }
+
+        @{
+            Name     = 'PROXY01'
+            Stage    = 'wsus'
+            Template = 'RL10'
+            CPU      = 2
+            MemoryMB = 2048
+            Switch   = @('LAB-Egress')
         }
 
         # ============================================================

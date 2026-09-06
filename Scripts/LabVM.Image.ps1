@@ -6,7 +6,6 @@
 
 $script:TemplateGeneralizationCache = @{}
 
-
 function ConvertTo-UnattendPassword {
     [CmdletBinding()]
     [OutputType([string])]

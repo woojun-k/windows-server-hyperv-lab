@@ -3,7 +3,6 @@
 # 오케스트레이션 함수가 반환하는 Lab.*Result 계약을 만든다.
 # LabVM.psm1이 dot-source하며 모듈 스코프를 공유한다.
 
-
 function New-LabVmResult {
     [CmdletBinding()]
     [Diagnostics.CodeAnalysis.SuppressMessage(
@@ -53,8 +52,6 @@ function New-LabVmResult {
 
         [string]$ErrorMessage,
 
-        # Created 상태에서만 의미가 있다. 콘솔 출력이
-        # 이 값들로 표시를 재구성할 수 있도록 결과 계약에 담아 둔다.
         [Nullable[int]]$CPU,
 
         [Nullable[int64]]$MemoryMB,
@@ -624,6 +621,132 @@ function New-LabVmActivationCompletionResult {
     }
 }
 
+function New-LabVmCloudInitSeedResult {
+    [CmdletBinding()]
+    [Diagnostics.CodeAnalysis.SuppressMessage(
+        'PSUseShouldProcessForStateChangingFunctions',
+        '',
+        Justification = '메모리 내 결과 객체만 생성하며 외부 상태를 변경하지 않는다.'
+    )]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Name,
+
+        [Parameter(Mandatory)]
+        [ValidateSet(
+            'Removed',
+            'Skipped',
+            'TimedOut',
+            'Failed'
+        )]
+        [string]$Status,
+
+        [Parameter(Mandatory)]
+        [bool]$Succeeded,
+
+        [ValidateSet(
+            'Removed',
+            'SeedNotFound',
+            'GuestNotRunning',
+            'SeedWaitTimedOut',
+            'RemoveFailed',
+            'ShouldProcessDeclined'
+        )]
+        [string]$Reason,
+
+        [string]$SeedVhdPath,
+
+        [object[]]$Issues = @(),
+
+        [string]$ErrorMessage
+    )
+
+    Assert-LabResultContract `
+        -Kind 'VM cloud-init 시드 회수 결과' `
+        -Status $Status `
+        -Succeeded $Succeeded `
+        -SuccessStatus 'Removed', 'Skipped', 'TimedOut'
+
+    [pscustomobject]@{
+        PSTypeName  = 'Lab.VmCloudInitSeedResult'
+        Name        = $Name
+        Status      = $Status
+        Succeeded   = $Succeeded
+        Reason      = $Reason
+        SeedVhdPath = $SeedVhdPath
+        Issues      = @($Issues)
+        Error       = $ErrorMessage
+    }
+}
+
+function New-LabCloudInitSeedRemovalResult {
+    [CmdletBinding()]
+    [Diagnostics.CodeAnalysis.SuppressMessage(
+        'PSUseShouldProcessForStateChangingFunctions',
+        '',
+        Justification = '메모리 내 결과 객체만 생성하며 외부 상태를 변경하지 않는다.'
+    )]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Stage,
+
+        [Parameter(Mandatory)]
+        [ValidateSet(
+            'Removed',
+            'Skipped',
+            'TimedOut',
+            'Failed'
+        )]
+        [string]$Status,
+
+        [Parameter(Mandatory)]
+        [bool]$Succeeded,
+
+        [ValidateSet(
+            'ShouldProcessDeclined',
+            'NoSeedDisk',
+            'Completed',
+            'SeedWaitTimedOut',
+            'RemoveFailed'
+        )]
+        [string]$Reason,
+
+        [object[]]$Results = @(),
+
+        [string[]]$TimedOutNames = @()
+    )
+
+    Assert-LabResultContract `
+        -Kind 'cloud-init 시드 회수 결과' `
+        -Status $Status `
+        -Succeeded $Succeeded `
+        -SuccessStatus 'Removed', 'Skipped', 'TimedOut'
+
+    [pscustomobject]@{
+        PSTypeName    = 'Lab.CloudInitSeedRemovalResult'
+        Stage         = $Stage
+        Status        = $Status
+        Succeeded     = $Succeeded
+        Reason        = $Reason
+
+        RemovedCount  = Get-LabStatusCount `
+            -Result $Results `
+            -Status 'Removed'
+
+        SkippedCount  = Get-LabStatusCount `
+            -Result $Results `
+            -Status 'Skipped'
+
+        FailedCount   = Get-LabStatusCount `
+            -Result $Results `
+            -Status 'Failed'
+
+        TimedOutNames = @($TimedOutNames)
+        Results       = @($Results)
+    }
+}
+
 function New-LabVmStartResult {
     [CmdletBinding()]
     [Diagnostics.CodeAnalysis.SuppressMessage(
@@ -727,17 +850,13 @@ function New-LabStageStartResult {
 
         [object[]]$RequiredSwitches = @(),
 
-        # StageDependencies로 이 Stage와 함께 자동으로 켠(또는 켜려고
-        # 시도한) VM 이름. Results에도 각 VM별 결과가 들어있지만,
-        # 이 필드는 "왜 이 VM들이 대상에 포함됐는지"를 바로 보여준다.
         [object[]]$DependencyNames = @(),
 
         [psobject]$MemoryBudget,
 
-        # 이번 호출로 새로 시작된 VM 중 평가판 활성화가 필요했던
-        # VM에 대해 Complete-LabVmActivation을 자동 실행한 결과.
-        # 대상이 없었거나 -SkipActivation이었으면 $null이다.
-        [psobject]$ActivationResult
+        [psobject]$ActivationResult,
+
+        [psobject]$CloudInitSeedResult
     )
 
     Assert-LabResultContract `
@@ -769,11 +888,12 @@ function New-LabStageStartResult {
             -Result $Results `
             -Status 'Failed'
 
-        Results          = @($Results)
-        RequiredSwitches = @($RequiredSwitches)
-        DependencyNames  = @($DependencyNames)
-        MemoryBudget     = $MemoryBudget
-        ActivationResult = $ActivationResult
+        Results             = @($Results)
+        RequiredSwitches    = @($RequiredSwitches)
+        DependencyNames     = @($DependencyNames)
+        MemoryBudget        = $MemoryBudget
+        ActivationResult    = $ActivationResult
+        CloudInitSeedResult = $CloudInitSeedResult
     }
 }
 

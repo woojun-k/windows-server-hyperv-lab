@@ -4,13 +4,8 @@
 # 충족되는지 검사한다. LabVM.psm1이 dot-source하며 모듈
 # 스코프를 공유한다.
 
-# 교정 가능한 드리프트 Category의 단일 정의. RequiresOff/Repair를 여기
-# 한 곳에만 두어, Test-LabExistingVmCompliance(생산자)와
-# Repair-LabVmDrift(소비자)가 서로 다른 Category 집합을 갖는 문제를 막는다.
-# Category가 이 표에 없으면 애초에 교정 대상이 아니다(Fixable=$false).
 $script:LabDriftRuleTable = [ordered]@{
     CPU = @{
-        # RequiresOff=$true인 Category는 VM이 꺼져 있어야만 안전하게 교정할 수 있다.
         RequiresOff = $true
         Expected    = { param($Spec, $VM, $Memory) [int]$Spec['CPU'] }
         Actual      = { param($Spec, $VM, $Memory) [int]$VM.ProcessorCount }
@@ -112,9 +107,6 @@ $script:LabDriftRuleTable = [ordered]@{
         }
     }
 
-    # Expected/Actual/Format이 없다: 어댑터별로 반복 검사해야 해서
-    # 스칼라 비교로 표현할 수 없다. 네트워크 어댑터 루프에서 직접
-    # Add-LabDrift를 호출하고, 교정만 이 표의 Repair를 공유한다.
     MacSpoofing = @{
         RequiresOff = $false
         Repair      = {
@@ -159,8 +151,6 @@ function Test-LabExistingVmCompliance {
         [Parameter(Mandatory)]
         [string]$ExpectedVmPath,
 
-        # 호출자가 이미 조회해 둔 값이 있으면 재사용해 동일 VM에 대한
-        # 중복 Hyper-V 조회를 줄인다. 넘기지 않으면 이 함수가 직접 조회한다.
         [AllowNull()]
         [object]$Memory,
 
@@ -228,10 +218,6 @@ function Test-LabExistingVmCompliance {
             }
         )
     }
-
-    # $script:LabDriftRuleTable에 Expected/Actual/Format이 모두 있는
-    # 스칼라 비교 Category용 헬퍼. CPU/Memory처럼 "설정값과 실제값을
-    # 비교해 다르면 드리프트"로 표현되는 검사의 반복을 줄인다.
     function Test-LabRuleDrift {
         param(
             [Parameter(Mandatory)]
@@ -251,7 +237,6 @@ function Test-LabExistingVmCompliance {
         }
     }
 
-    # 이후 모든 검사에서 재사용하므로 여기서 한 번만 조회한다.
     $memory = if ($Memory) {
         $Memory
     }
@@ -363,6 +348,35 @@ function Test-LabExistingVmCompliance {
             )
     }
 
+    $expectedSecureBootTemplate =
+        Get-LabSecureBootTemplateName -Template $Template
+
+    $actualSecureBootTemplate = if (
+        $firmware.PSObject.Properties['SecureBootTemplate']
+    ) {
+        [string]$firmware.SecureBootTemplate
+    }
+    else {
+        ''
+    }
+
+    if (
+        $expectedSecureBoot -and
+        -not [string]::IsNullOrWhiteSpace(
+            $actualSecureBootTemplate
+        ) -and
+        $actualSecureBootTemplate -ne
+        $expectedSecureBootTemplate
+    ) {
+        Add-LabDrift `
+            -Category 'SecureBootTemplate' `
+            -Message (
+                "Secure Boot 템플릿 불일치: " +
+                "설정=$expectedSecureBootTemplate, " +
+                "실제=$actualSecureBootTemplate"
+            )
+    }
+
     $security = Get-VMSecurity `
         -VM $VM `
         -ErrorAction Stop
@@ -395,9 +409,6 @@ function Test-LabExistingVmCompliance {
         }
     )
 
-    # 역할에 따라 데이터 디스크가 추가로 연결될 수 있으므로, 연결된
-    # VHDX 총 개수가 아니라 예상 OS VHDX가 정확히 하나 연결됐는지만
-    # 검사한다. 관리 범위 밖의 추가 디스크는 드리프트로 취급하지 않는다.
     $expectedVhdPathNormalized = ConvertTo-LabNormalizedPath `
         -Path $ExpectedVhdPath
 
@@ -617,9 +628,6 @@ function Test-LabPrerequisite {
         [Parameter(Mandatory)]
         [System.Collections.IDictionary]$Spec,
 
-        # New-LabVM/New-LabStage처럼 이미 Get-LabConfig를 부른 호출자는
-        # 이걸 넘겨 재조회(및 재귀 딥카피)를 피한다. 생략하면 이 함수가
-        # 직접 조회한다.
         [System.Collections.IDictionary]$Config
     )
 
@@ -643,8 +651,6 @@ function Test-LabPrerequisite {
     $requiredDiskBytes = [int64]0
     $availableDiskBytes = [int64]0
 
-    # 검증 전에는 Name이 비어 있거나 잘못됐을 수 있으므로,
-    # 경로를 계산하지 않고 Failed 결과 표시용 이름만 확보한다.
     $vmName = if (
         $Spec.Contains('Name') -and
         -not [string]::IsNullOrWhiteSpace(
@@ -703,8 +709,6 @@ function Test-LabPrerequisite {
             DiskMode           = $diskMode
             RequiredDiskBytes  = $requiredDiskBytes
             AvailableDiskBytes = $availableDiskBytes
-            # 기존 VM과 비교한 구조화된 드리프트. Conflict일 때만 채워지며,
-            # New-LabVM -Reconcile이 Fixable 항목만 골라 교정하는 데 쓴다.
             Compliance         = $compliance
         }
     }
@@ -730,10 +734,6 @@ function Test-LabPrerequisite {
             -Disposition Failed
     }
 
-    # Resolve-LabVmSpec이 $Spec을 정규화된 사본으로 재바인딩했으므로,
-    # 그 이전(원시 $Spec 기준)에 계산해 둔 $diskMode/$isFullCopy는 낡은
-    # 값이다. 여기서 다시 계산해야 DiskMode 기본값 규칙이
-    # Resolve-LabVmSpec 한 곳에만 있게 된다.
     $vmName = [string]$Spec['Name']
     $diskMode = [string]$Spec['DiskMode']
     $isFullCopy = ($diskMode -eq 'FullCopy')
@@ -873,9 +873,6 @@ function Test-LabPrerequisite {
 
         $switchSpec = $switchSpecs[0]
 
-        # Get-VMSwitch -Name은 와일드카드를 해석하고, 동일한 이름의
-        # 스위치가 여러 개 있으면 배열을 반환한다. 정확히 하나만
-        # 매칭되는지 이름을 다시 대조해 확인한다.
         try {
             $matchingSwitches = @(
                 Get-VMSwitch -ErrorAction Stop |
@@ -957,7 +954,6 @@ function Test-LabPrerequisite {
     $vmPathExists =
         Test-Path -LiteralPath $vmPath
 
-    # VM은 없지만 파일이나 디렉터리만 남아 있으면 충돌
     if (-not $existingVm) {
         if ($childExists) {
             $issues.Add(
@@ -979,7 +975,6 @@ function Test-LabPrerequisite {
         }
     }
 
-    # 기존 VM이 있으면 원하는 상태와 비교
     if ($existingVm) {
         try {
             $compliance =
@@ -1079,15 +1074,20 @@ function Test-LabPrerequisite {
                 )
             }
 
-            # generalize 결과가 이미 캐시(메모리 또는 디스크의 영구
-            # 캐시 파일)에 있으면 마운트 없이 그대로 쓴다. 이 템플릿을
-            # 부모로 하는 차등 디스크 VM이 실행 중이라 Attached=True로
-            # 보여도, 캐시가 있으면 전혀 문제가 되지 않는다.
-            $cachedGeneralization =
+            $isLinuxTemplate =
+                Test-LabTemplateIsLinux -Template $template
+
+            $cachedGeneralization = if ($isLinuxTemplate) {
+                $null
+            }
+            else {
                 Get-LabTemplateGeneralizationCached `
                     -VhdPath $template.VhdPath
+            }
 
-            if ($cachedGeneralization) {
+            if ($isLinuxTemplate) {
+            }
+            elseif ($cachedGeneralization) {
                 foreach (
                     $generalizationIssue in
                     @($cachedGeneralization.Issues)
@@ -1109,12 +1109,6 @@ function Test-LabPrerequisite {
                 }
             }
             elseif ($templateVhd.Attached) {
-                # 캐시가 없는데 지금은 마운트해서 새로 계산할 수도
-                # 없다(직접 연결됐거나, 다른 차등 디스크 VM이 실행
-                # 중이라 Attached=True). 이 템플릿에 대한 generalize
-                # 검사가 이번이 처음이라면, 아무 Stage VM도 켜져 있지
-                # 않은 시점에 한 번 New-LabStage/New-LabVM을 실행해
-                # 캐시를 만들어 두어야 한다.
                 $warnings.Add(
                     '템플릿 generalize 검사 결과가 캐시에 없고, ' +
                     '지금은 템플릿이 연결된 상태라 새로 계산할 수 ' +
@@ -1248,6 +1242,10 @@ function Test-LabPrerequisite {
 
     if (
         -not (
+            Test-LabTemplateIsLinux `
+                -Template $template
+        ) -and
+        -not (
             Test-Path `
                 -LiteralPath $template.UnattendPath
         )
@@ -1262,8 +1260,7 @@ function Test-LabPrerequisite {
         return New-PrerequisiteResult `
             -Disposition Failed
     }
-
-    # 기존 리소스 없음 + 모든 생성 조건 충족
+    
     return New-PrerequisiteResult `
         -Disposition Create
 }

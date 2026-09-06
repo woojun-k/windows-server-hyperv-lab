@@ -18,7 +18,10 @@ function Test-LabVmRemovalConflict {
         [string]$ExpectedVhdNormalized,
 
         [Parameter(Mandatory)]
-        [string]$ExpectedVmNormalized
+        [string]$ExpectedVmNormalized,
+
+        [AllowEmptyCollection()]
+        [string[]]$AdditionalExpectedVhdNormalized = @()
     )
 
     $result = [pscustomobject]@{
@@ -118,10 +121,17 @@ function Test-LabVmRemovalConflict {
 
     $result.ActualDiskPaths = $actualDiskPaths
 
+    $labOwnedDiskPaths = @(
+        $ExpectedVhdNormalized
+    ) + @(
+        $AdditionalExpectedVhdNormalized |
+            Select-LabNonEmptyString
+    )
+
     $externalDiskPaths = @(
         $actualDiskPaths |
             Where-Object {
-                $_ -ine $ExpectedVhdNormalized
+                $labOwnedDiskPaths -inotcontains $_
             }
     )
 
@@ -160,9 +170,6 @@ function Test-LabVmRemovalConflict {
         return $result
     }
 
-    # 외부 VHDX가 제거 대상 VM 구성 디렉터리 안에 있으면, VM 등록 제거
-    # 후 $ExpectedVmPath를 재귀 삭제할 때 그 파일도 함께 지워진다.
-    # 이 경우는 -Force로도 자동 제거를 허용하지 않는다.
     $expectedVmPrefix = (
         $ExpectedVmNormalized +
         [IO.Path]::DirectorySeparatorChar
@@ -262,14 +269,10 @@ function Test-LabVmRemovalCrossUse {
         [object[]]$ActualDiskPaths = @()
     )
 
-    # 이 지점에서는 VM, VHDX, 디렉터리를 절대 변경하지 않는다.
-    # 모든 차단 조건을 확인한 뒤에만 $null을 반환해 실제 제거로 넘어간다.
-
     $preservedPaths =
         [Collections.Generic.List[string]]::new()
 
     try {
-        # 실행 중 VM은 실제 제거 전에 차단한다.
         if (
             $Vm -and
             $Vm.State -ne 'Off' -and
@@ -295,8 +298,6 @@ function Test-LabVmRemovalCrossUse {
             )
         }
 
-        # 이후 검사에서 SilentlyContinue를 쓰지 않는다.
-        # 조회 실패를 "사용 중인 VM 없음"으로 오판하면 안 된다.
         $allVms = @(
             Get-VM -ErrorAction Stop
         )
@@ -470,11 +471,6 @@ function Test-LabVmRemovalCrossUse {
                 -Path $ExpectedVhdPath `
                 -ErrorAction Stop
 
-            # 대상 VM이 사용하는 정상 연결은 허용한다.
-            # 대상 VM 제거 후 자동으로 분리되기 때문이다.
-            #
-            # 대상 VM이 사용하지 않는데 Attached이면
-            # 호스트 Mount-VHD 또는 다른 외부 연결로 판단한다.
             if (
                 $expectedVhd.Attached -and
                 -not $targetUsesExpectedVhd
@@ -554,6 +550,14 @@ function Invoke-LabVmRemovalExecution {
         [Parameter(Mandatory)]
         [string]$ExpectedVhdNormalized,
 
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$SeedVhdPath,
+
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$SeedVhdNormalized,
+
         [object[]]$ActualDiskPaths = @(),
 
         [Collections.Generic.List[string]]$RemovedPaths,
@@ -565,9 +569,6 @@ function Invoke-LabVmRemovalExecution {
 
     if ($Vm) {
         if ($Snapshots.Count -gt 0) {
-            # 사전 검사에서 -Force가 확인된 경우에만 도달한다.
-            # 병합 없이 Remove-VM부터 하면 체크포인트 .avhdx가
-            # 고아로 남으므로, 등록 제거 전에 먼저 병합한다.
             $rootSnapshots = @(
                 $Snapshots |
                     Where-Object {
@@ -621,8 +622,6 @@ function Invoke-LabVmRemovalExecution {
                 Start-Sleep -Seconds 2
             }
 
-            # 병합 후 연결된 디스크가 바뀌므로 보존 경로 보고를
-            # 위해 다시 조회한다.
             $actualDiskPaths = @(
                 Get-VMHardDiskDrive `
                     -VM $Vm `
@@ -636,8 +635,6 @@ function Invoke-LabVmRemovalExecution {
         }
 
         if ($Vm.State -ne 'Off') {
-            # 여기까지 왔다는 것은 사전 검사에서
-            # -Force가 확인됐다는 뜻이다.
             Stop-VM `
                 -VM $Vm `
                 -TurnOff `
@@ -659,8 +656,6 @@ function Invoke-LabVmRemovalExecution {
         Test-Path `
             -LiteralPath $ExpectedVhdPath
     ) {
-        # Remove-VM 이후 대상 VM의 디스크 연결이
-        # 실제로 해제됐는지 마지막으로 검사한다.
         $vhd = Get-VHD `
             -Path $ExpectedVhdPath `
             -ErrorAction Stop
@@ -684,12 +679,38 @@ function Invoke-LabVmRemovalExecution {
     }
 
     if (
+        -not [string]::IsNullOrWhiteSpace($SeedVhdPath) -and
+        (
+            Test-Path `
+                -LiteralPath $SeedVhdPath
+        )
+    ) {
+        $seedVhd = Get-VHD `
+            -Path $SeedVhdPath `
+            -ErrorAction Stop
+
+        if ($seedVhd.Attached) {
+            throw (
+                'VM 등록 제거 후에도 cloud-init 시드 VHDX가 ' +
+                '연결된 상태입니다: ' +
+                $SeedVhdPath
+            )
+        }
+
+        Remove-Item `
+            -LiteralPath $SeedVhdPath `
+            -Force `
+            -ErrorAction Stop
+
+        $RemovedPaths.Add(
+            $SeedVhdPath
+        )
+    }
+
+    if (
         Test-Path `
             -LiteralPath $ExpectedVmPath
     ) {
-        # 사전 검사 이후 다른 프로세스가 파일을 새로 만든 경쟁
-        # 조건에 대비해, 디렉터리 안에 남은 파일이 없을 때만
-        # 재귀 삭제한다. 남은 파일이 있으면 통째로 보존한다.
         $labOwnedMarkerNames = @(
             '.labvm-creation-owner',
             '.labvm-activation-state'
@@ -723,12 +744,16 @@ function Invoke-LabVmRemovalExecution {
         }
     }
 
-    # 실제 VM에 예상 경로 외 디스크가 연결돼 있었더라도
-    # 해당 VHDX 파일은 직접 삭제하지 않는다.
+    $labOwnedDiskPaths = @(
+        $ExpectedVhdNormalized
+    ) + @(
+        @($SeedVhdNormalized) |
+            Select-LabNonEmptyString
+    )
+
     foreach ($actualDiskPath in $actualDiskPaths) {
         if (
-            $actualDiskPath -ine
-            $ExpectedVhdNormalized
+            $labOwnedDiskPaths -inotcontains $actualDiskPath
         ) {
             $PreservedPaths.Add(
                 $actualDiskPath

@@ -20,6 +20,7 @@ Windows Server 2025 실습용 Hyper-V VM을 일관된 구성으로 생성하고 
 - 설정값과 실제 Hyper-V 구성의 드리프트 확인
 - 안전한 일부 드리프트 자동 교정
 - Stage 단위 시작·종료·초기화
+- 첫 부팅 뒤 cloud-init 시드 디스크 자동 회수
 - 중첩 Hyper-V와 MAC 주소 스푸핑 지원
 - `-WhatIf` 및 확인 프롬프트 지원
 
@@ -154,7 +155,7 @@ Get-LabConfig -Refresh
 ```powershell
 New-VMSwitch `
     -Name 'LAB-Internal' `
-    -SwitchType Internal
+    -SwitchType Private
 ```
 
 ### DMZ
@@ -468,6 +469,37 @@ Stop-LabStage `
 `-TurnOff`는 정상 종료 절차를 건너뛰므로 응답하지 않는 VM에만 사용하십시오.
 
 `Stop-LabStage`도 `StageDependencies`로 자동 시작됐던 VM을 Stage 자체 VM 다음에 이어서 끕니다. 다만 그 VM을 다른 Stage가 아직 쓰는 중이면(그 Stage 소유 VM이 하나라도 실행 중이면) 건너뛰고 `Reason = StillRequiredByStage`를 반환합니다. 예를 들어 `addc`가 실행 중일 때 `Stop-LabStage -Stage rras`를 실행해도 `RRAS01`은 꺼지지 않습니다. 이 보호를 무시하고 정말 끄려면 `-Force`를 사용합니다.
+
+---
+
+## cloud-init 시드 회수
+
+Linux 템플릿으로 만든 VM에는 호스트 이름과 계정 암호를 넘기기 위해 `VHDs\<VM 이름>-seed.vhdx`(cloud-init NoCloud 시드)가 두 번째 디스크로 붙습니다. 이 시드의 `user-data`에는 암호가 평문으로 들어가고, 쓰이는 시점은 첫 부팅 한 번뿐입니다.
+
+그래서 `Start-LabStage`와 `New-LabStage -CompleteActivation`은 첫 부팅이 끝나면 시드 디스크를 분리하고 VHDX 파일까지 삭제합니다. 끝났다는 사실은 게스트가 알립니다. `user-data`의 마지막 `runcmd`가 Hyper-V KVP 풀(`/var/lib/hyperv/.kvp_pool_1`)에 `LabSeedApplied = <VM 이름>`을 쓰고 `hypervkvpd`를 다시 시작하며, 호스트는 이 값을 `GuestExchangeItems`에서 읽습니다. `runcmd`는 cloud-init의 마지막 단계라 암호 주입까지 끝난 뒤이고, 그래서 호스트가 따로 기다리지 않습니다(`-SeedGraceSeconds` 기본값 0).
+
+`-SeedTimeoutSeconds`(기본 300초) 안에 표시가 올라오지 않으면 시드를 남기고 경고합니다. 게스트에서 `cloud-init status --long`과 `systemctl status hypervkvpd`로 원인을 확인한 뒤 다시 회수합니다.
+
+```powershell
+Remove-LabVmCloudInitSeed `
+    -Name PROXY01
+```
+
+첫 부팅이 끝난 것이 확실하면 확인 없이 회수합니다.
+
+```powershell
+Remove-LabVmCloudInitSeed `
+    -Name PROXY01 `
+    -Force
+```
+
+회수를 아예 하지 않으려면 `-SkipSeedCleanup`을 사용합니다.
+
+```powershell
+Start-LabStage `
+    -Stage wsus `
+    -SkipSeedCleanup
+```
 
 ---
 

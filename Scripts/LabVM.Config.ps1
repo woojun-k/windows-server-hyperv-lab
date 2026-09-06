@@ -6,7 +6,6 @@
 
 $script:Config = $null
 
-
 function Assert-LabVmSpec {
     [CmdletBinding()]
     param(
@@ -157,11 +156,6 @@ function Assert-LabVmSpec {
 }
 
 function ConvertTo-LabNormalizedVmSpec {
-    # Vm 해시테이블에 선택적 키의 기본값을 채워 넣기만 한다(검증은
-    # 하지 않는다). Resolve-LabVmSpec처럼 전체 Config(Templates,
-    # Switches)를 갖춘 경로와 Resolve-LabSpec처럼 이름/Stage로 가볍게
-    # 조회만 하는 경로 양쪽에서 같은 기본값 적용 로직을 공유해, 둘 중
-    # 한쪽에만 기본값이 채워지는 일이 없도록 한다.
     [CmdletBinding()]
     [OutputType([hashtable])]
     param(
@@ -418,13 +412,36 @@ function Assert-LabConfig {
             )
         }
 
-        foreach ($requiredKey in @(
+        $templateOsType = Get-LabTemplateOSType `
+            -Template $templateEntry
+
+        if (
+            @('Windows', 'Linux') -notcontains $templateOsType
+        ) {
+            throw (
+                "템플릿 '$templateName'의 OSType이 " +
+                "올바르지 않습니다: $templateOsType"
+            )
+        }
+
+        $requiredTemplateKeys = @(
             'Vhd',
-            'Unattend',
-            'AccountMode',
             'SecureBoot',
             'EnableTpm'
-        )) {
+        )
+
+        $templatePathKeys = @('Vhd')
+
+        if ($templateOsType -eq 'Windows') {
+            $requiredTemplateKeys += @(
+                'Unattend',
+                'AccountMode'
+            )
+
+            $templatePathKeys += 'Unattend'
+        }
+
+        foreach ($requiredKey in $requiredTemplateKeys) {
             if (-not $templateEntry.Contains($requiredKey)) {
                 throw (
                     "템플릿 '$templateName' 정의에 " +
@@ -433,7 +450,7 @@ function Assert-LabConfig {
             }
         }
 
-        foreach ($pathKey in @('Vhd', 'Unattend')) {
+        foreach ($pathKey in $templatePathKeys) {
             if (
                 [string]::IsNullOrWhiteSpace(
                     [string]$templateEntry[$pathKey]
@@ -461,6 +478,7 @@ function Assert-LabConfig {
         }
 
         if (
+            $templateOsType -eq 'Windows' -and
             @(
                 'BuiltInAdministrator',
                 'LocalAccount'
@@ -529,8 +547,6 @@ function Assert-LabConfig {
             [string]$vm['Stage']
     }
 
-    # Stage 단위 의존 그래프: key Stage -> 그 key가 요구하는 VM들의
-    # 소유 Stage 집합. 순환 참조 탐지에 쓴다.
     $stageDependsOnStages = @{}
 
     foreach (
@@ -582,8 +598,6 @@ function Assert-LabConfig {
         )
     }
 
-    # 색상 기반 DFS로 모든 간선을 따라가며 순환을 찾는다(첫 번째
-    # 의존 Stage만 따라가면 다른 가지를 통한 순환을 놓칠 수 있다).
     # 0=미방문, 1=경로상(방문 중), 2=완료.
     $stageColor = @{}
 
@@ -776,7 +790,6 @@ function Resolve-LabSingleSpec {
         [Parameter(Mandatory)]
         [string]$Name,
 
-        # 오류 메시지에 붙는 호출 맥락. 예: '-Also 대상'
         [string]$Context,
 
         [System.Collections.IDictionary]$Config
@@ -885,11 +898,15 @@ function Get-LabVmPath {
     }
 
     [pscustomobject]@{
-        VhdPath = Join-Path `
+        VhdPath     = Join-Path `
             $Config['LabRoot'] `
             "VHDs\$Name.vhdx"
 
-        VmPath  = Join-Path `
+        SeedVhdPath = Join-Path `
+            $Config['LabRoot'] `
+            "VHDs\$Name-seed.vhdx"
+
+        VmPath      = Join-Path `
             $Config['LabRoot'] `
             "VMs\$Name"
     }
@@ -935,12 +952,6 @@ function Get-LabStageSwitch {
 }
 
 function Get-LabStageDependencyClosure {
-    # $Stage를 시작하려면 자동으로 함께 켜야 하는 VM 이름을,
-    # StageDependencies에 선언된 직접 의존부터 시작해 재귀적으로
-    # 전부 펼쳐서 돌려준다(전이 의존: dhcp가 addc의 DC01을 요구하고
-    # addc가 rras의 RRAS01을 요구하면, dhcp의 closure에는 DC01과
-    # RRAS01이 모두 들어간다). 반환 순서는 발견 순서(직접 의존이
-    # 먼저)이며, 이 순서가 그대로 시작 순서로 쓰인다.
     [CmdletBinding()]
     [OutputType([array])]
     param(
@@ -956,10 +967,6 @@ function Get-LabStageDependencyClosure {
 
     $cfg = $Config
 
-    # StageDependencies 자체가 없거나(레거시/테스트 Config) 특정
-    # Stage 키가 없을 수 있다 - 그런 경우는 의존성 없음으로 취급한다.
-    # Set-StrictMode -Version Latest에서는 $null을 인덱싱하면 예외가
-    # 나므로 .Contains()로 먼저 키 존재를 확인한다.
     $stageDependencies = $cfg['StageDependencies']
 
     $result = [Collections.Generic.List[string]]::new()
@@ -1160,6 +1167,81 @@ function Get-LabStageRequiredSwitch {
     }
 }
 
+function Get-LabTemplateOSType {
+    <#
+    .SYNOPSIS
+        템플릿 정의의 OSType을 돌려준다. 값이 없으면 'Windows'로 본다.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary]$Template
+    )
+
+    $value = [string]$Template['OSType']
+
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return 'Windows'
+    }
+
+    $value
+}
+
+function Test-LabTemplateIsLinux {
+    <#
+    .SYNOPSIS
+        해석된 템플릿이 Linux 게스트인지 확인한다.
+    .DESCRIPTION
+        OSType이 없는 템플릿 객체(과거 형식, 테스트 대역)는 Windows로
+        본다. StrictMode에서 없는 속성 접근이 오류가 되므로 속성
+        존재 여부를 먼저 확인한다.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [psobject]$Template
+    )
+
+    $value = if (
+        $Template -is [System.Collections.IDictionary]
+    ) {
+        [string]$Template['OSType']
+    }
+    elseif ($Template.PSObject.Properties['OSType']) {
+        [string]$Template.OSType
+    }
+    else {
+        ''
+    }
+
+    $value -eq 'Linux'
+}
+
+function Get-LabSecureBootTemplateName {
+    <#
+    .SYNOPSIS
+        게스트 OS에 맞는 Secure Boot 인증서 템플릿 이름을 돌려준다.
+    .DESCRIPTION
+        Linux Generation 2 VM은 Windows 인증서로 서명되지 않았으므로
+        MicrosoftUEFICertificateAuthority 템플릿을 사용해야 부팅한다.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)]
+        [psobject]$Template
+    )
+
+    if (Test-LabTemplateIsLinux -Template $Template) {
+        'MicrosoftUEFICertificateAuthority'
+    }
+    else {
+        'MicrosoftWindows'
+    }
+}
+
 function Resolve-LabTemplate {
     [CmdletBinding()]
     param(
@@ -1180,12 +1262,21 @@ function Resolve-LabTemplate {
         throw "템플릿 '$Name'이 LabConfig.psd1에 정의되어 있지 않습니다."
     }
 
+    $osType = Get-LabTemplateOSType -Template $entry
+
+    $unattendPath = if ($osType -eq 'Windows') {
+        Join-Path $PSScriptRoot $entry.Unattend
+    }
+    else {
+        $null
+    }
 
     [pscustomobject]@{
         Name         = $Name
+        OSType       = $osType
         VhdPath      = Join-Path $cfg.LabRoot $entry.Vhd
-        UnattendPath = Join-Path $PSScriptRoot $entry.Unattend
-        AccountMode  = [string]$entry.AccountMode
+        UnattendPath = $unattendPath
+        AccountMode  = [string]$entry['AccountMode']
         SecureBoot   = [bool]$entry.SecureBoot
         EnableTpm    = [bool]$entry.EnableTpm
     }

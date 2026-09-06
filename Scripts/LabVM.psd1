@@ -22,6 +22,7 @@
         'Grant-LabVmActivationNetwork',
         'Revoke-LabVmActivationNetwork',
         'Complete-LabVmActivation',
+        'Remove-LabVmCloudInitSeed',
         'Get-LabStatus'
     )
     CmdletsToExport   = @()

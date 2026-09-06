@@ -42,4 +42,5 @@ Export-ModuleMember -Function `
     Grant-LabVmActivationNetwork, `
     Revoke-LabVmActivationNetwork, `
     Complete-LabVmActivation, `
+    Remove-LabVmCloudInitSeed, `
     Get-LabStatus

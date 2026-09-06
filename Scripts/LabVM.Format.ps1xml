@@ -407,6 +407,66 @@
     </View>
 
     <View>
+      <Name>Lab.VmCloudInitSeedResult</Name>
+      <ViewSelectedBy>
+        <TypeName>Lab.VmCloudInitSeedResult</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <AutoSize />
+        <TableHeaders>
+          <TableColumnHeader><Label>Name</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Status</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Reason</Label></TableColumnHeader>
+          <TableColumnHeader><Label>SeedVhdPath</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>Name</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Status</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Reason</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>SeedVhdPath</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
+      <Name>Lab.CloudInitSeedRemovalResult</Name>
+      <ViewSelectedBy>
+        <TypeName>Lab.CloudInitSeedRemovalResult</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <AutoSize />
+        <TableHeaders>
+          <TableColumnHeader><Label>Stage</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Status</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Reason</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Removed</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Skipped</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Failed</Label></TableColumnHeader>
+          <TableColumnHeader><Label>TimedOut</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>Stage</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Status</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Reason</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>RemovedCount</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>SkippedCount</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>FailedCount</PropertyName></TableColumnItem>
+              <TableColumnItem>
+                <ScriptBlock>@($_.TimedOutNames) -join ', '</ScriptBlock>
+              </TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <View>
       <Name>Lab.PrerequisiteResult</Name>
       <ViewSelectedBy>
         <TypeName>Lab.PrerequisiteResult</TypeName>

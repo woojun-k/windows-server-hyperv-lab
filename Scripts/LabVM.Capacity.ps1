@@ -16,17 +16,6 @@ function Update-LabStagePlanDiskBudget {
         [object[]]$Plans = @()
     )
 
-    # 개별 Test-LabPrerequisite 검사는 각 VM 하나를 생성할 수 있는지만
-    # 검사한다. 이 함수는 Stage에서 실제로 생성할 Create 계획들의 디스크
-    # 요구량을 합산해 전체 생성 가능 여부를 검사하고, 부족하면 해당
-    # Create 계획들을 Failed로 바꾼다. $Plans의 원소는 pscustomobject라
-    # 참조로 전달되므로 이 함수 안에서 바꾼 내용이 호출자에도 반영된다.
-    #
-    # Skip은 추가 디스크 공간이 필요 없고, Conflict/Failed가 하나라도
-    # 있으면 어차피 Stage 전체가 중단되므로 합산 검사를 생략한다.
-    # 단, ReconcileEligible로 표시된 Conflict는 New-LabStage -Reconcile
-    # 아래에서 Stage를 막지 않고 2단계로 넘어가므로 blocker로 세지 않는다.
-
     $hasIndividualBlocker = (
         @(
             Select-LabResultByStatus `
@@ -54,8 +43,6 @@ function Update-LabStagePlanDiskBudget {
         return
     }
 
-    # Stage 안에서도 VM마다 DiskMode(FullCopy/Differencing)가
-    # 다를 수 있으므로 모드별로 나눠 합산한다.
     $fullCopyCreatePlans = @(
         $createPlans |
             Where-Object {
@@ -111,7 +98,6 @@ function Update-LabStagePlanDiskBudget {
         $stageSafetyReserveBytes
     )
 
-    # 모든 Create 계획이 같은 LabRoot 볼륨을 쓰므로 볼륨은 여기서 한 번만 조회한다.
     $labRootDriveRoot = [IO.Path]::GetPathRoot(
         [IO.Path]::GetFullPath([string]$Config['LabRoot'])
     )
@@ -203,10 +189,6 @@ function Get-LabHostMemoryBudget {
         Get-VM -ErrorAction Stop
     )
 
-    # $allVms가 비어 있으면(예: VM이 하나도 없는 새 호스트)
-    # Measure-Object가 아무 출력도 내지 않아 $measured 자체가
-    # $null이 된다 - Set-StrictMode에서 $null.Sum은 예외이므로
-    # .Sum에 접근하기 전에 먼저 확인한다.
     $measured = $allVms |
         Measure-Object `
             -Property MemoryAssigned `
@@ -260,7 +242,6 @@ function Get-LabHostMemoryBudget {
         $freeMB - $reservedMB
     )
 
-    # GB 표시는 Lab.MemoryBudget용 LabVM.Format.ps1xml 뷰가 담당한다.
     $memoryBudget = [pscustomobject]@{
         PSTypeName  = 'Lab.MemoryBudget'
         TotalMB     = $totalMB
